@@ -76,7 +76,9 @@ Reading View 用 `registerMarkdownPostProcessor` 遍历 `img/video/audio/a`，Li
 - 必须只用 Web Crypto (`crypto.subtle`) 做签名，禁止使用 Node `crypto/fs/stream/Buffer`。
 - 必须处理的附件类型：图片(png/jpg/jpeg/gif/webp/svg/bmp)、视频(mp4/mov/webm/mkv)、音频(mp3/wav/m4a/ogg/flac)、PDF；其他类型必须不动。
 - md 中必须以 `oss://{objectKey}` 占位存储，禁止直接写入带签名的 URL，因为签名会过期。
-- 上传成功前禁止删除本地文件；删除远端前必须二次确认。
+- 附件若已落地为本地文件，必须在 `CompleteMultipartUpload` 成功后再 `vault.delete`，禁止先删后传。
+- 拦截路径上传失败必须将 blob 回写为本地文件并移除占位链接，禁止直接丢弃数据。
+- 删除远端前必须二次确认。
 - objectKey 必须由 vault 名前缀 + 内容 SHA-1 + 原扩展名组成，避免多设备重复上传与冲突。
 - 必须对所有附件统一走 OSS Multipart Upload，禁止使用一次性 PutObject，因为路径唯一化便于维护与续传。
 - 必须在上传失败或用户取消时调 `AbortMultipartUpload`，禁止留孤儿分片，因为会持续计费。
