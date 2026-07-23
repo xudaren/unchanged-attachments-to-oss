@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: ""
+title: 项目根目录与 Agent 文档入口
+scope:
+    - README.md
+    - .claude/
+    - AGENTS.md
+    - CLAUDE.md
+source_files: []
+depends_on: []
+related_to: []
