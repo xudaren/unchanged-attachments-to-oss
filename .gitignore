@@ -1,0 +1,13 @@
+# build output
+node_modules/
+main.js
+*.log
+
+# obsidian
+.obsidian/plugins/*/data.json
+data.json
+
+# ide
+.vscode/
+.idea/
+.DS_Store

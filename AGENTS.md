@@ -16,6 +16,10 @@
 
 - 删除上传文件时，提示是否联动删除OSS中的文件，如果确定那么进行联动删除
 
+- 设置页提供「自动上传」开关（toggle），关闭后暂停自动上传，方便调试或离线编辑
+
+- 设置页保存时对 OSS 凭证进行连通性校验（ping），验证 AK/SK 有效性，校验失败提前报错阻止保存
+
 # 为什么
 
 >描述功能的意义，按以下维度展开：
@@ -35,7 +39,9 @@
 
 ### 配置
 
-用户在设置页填写：`region`、`bucketName`、`accessKeyId`、`accessKeySecret`、`endpoint`（可选）、`cname`（可选）、`objectKeyPrefix`（默认 vault 名）、`signedUrlExpireSeconds`（默认 3600）。明文存 `data.json`。
+用户在设置页填写：`region`、`bucketName`、`accessKeyId`、`accessKeySecret`、`endpoint`（可选）、`cname`（可选）、`objectKeyPrefix`（默认 vault 名）、`signedUrlExpireSeconds`（默认 3600）、`autoUpload`（默认 true）。明文存 `data.json`。
+
+保存时插件用已填凭证向 OSS 发送轻量请求（如 `GET /?buckets` 或 `HEAD /`）验证连通性与权限，失败则 Notice 报错并阻止保存。`autoUpload` 为 false 时，拦截器与 `vault.on('create')` 补传均跳过上传逻辑，已有 `oss://` 链接的渲染和删除不受影响。
 
 ### 上传
 
@@ -50,7 +56,7 @@ sequenceDiagram
     U->>E: 粘贴/拖入 图片/视频/音频/PDF
     E->>P: editor-paste / editor-drop 拦截
     P->>E: 插入 ![](oss://uploading/{tempId}) 占位
-    P->>O: InitiateMultipartUpload /{prefix}/{hash}.{ext}
+    P->>O: InitiateMultipartUpload /{prefix}/{uuid}.{ext}
     O-->>P: uploadId
     loop Blob.slice 逐片 4MB
         P->>O: UploadPart(uploadId, n)
@@ -68,20 +74,22 @@ Reading View 用 `registerMarkdownPostProcessor` 遍历 `img/video/audio/a`，Li
 
 ### 删除
 
-`vault.on('modify')` diff 出被移除的 `oss://{key}`，弹 Modal 确认后 `requestUrl DELETE /{key}`。
+`vault.on('modify')` debounce 1s 后 diff 出被移除的 `oss://{key}`，弹 Modal 确认后 `requestUrl DELETE /{key}`。不做跨文档引用统计，删错以用户确认为准。
 
 ## 约束
 
 - 必须只用 `requestUrl` 收发 HTTP，禁止使用 `fetch/XHR/ali-oss` SDK，因为要兼容移动端且绕 CORS。
 - 必须只用 Web Crypto (`crypto.subtle`) 做签名，禁止使用 Node `crypto/fs/stream/Buffer`。
 - 必须处理的附件类型：图片(png/jpg/jpeg/gif/webp/svg/bmp)、视频(mp4/mov/webm/mkv)、音频(mp3/wav/m4a/ogg/flac)、PDF；其他类型必须不动。
-- md 中必须以 `oss://{objectKey}` 占位存储，禁止直接写入带签名的 URL，因为签名会过期。
+- md 中必须以标准 markdown 语法 `![](oss://{key})` 占位存储，禁止使用 wikilink 或 HTML 内嵌，禁止直接写入带签名的 URL，因为渲染管线只处理单一形式且签名会过期。
 - 附件若已落地为本地文件，必须在 `CompleteMultipartUpload` 成功后再 `vault.delete`，禁止先删后传。
 - 拦截路径上传失败必须将 blob 回写为本地文件并移除占位链接，禁止直接丢弃数据。
-- 删除远端前必须二次确认。
-- objectKey 必须由 vault 名前缀 + 内容 SHA-1 + 原扩展名组成，避免多设备重复上传与冲突。
+- 删除远端前必须二次确认，禁止跨文档引用统计带来的复杂度，误删责任由用户承担。
+- objectKey 必须由 `{objectKeyPrefix}/{crypto.randomUUID()}.{ext}` 组成，禁止依赖内容哈希，因为流式分片无法边传边算 SHA-1；不做内容去重，孤儿文件由用户自行清理。
 - 必须对所有附件统一走 OSS Multipart Upload，禁止使用一次性 PutObject，因为路径唯一化便于维护与续传。
 - 必须在上传失败或用户取消时调 `AbortMultipartUpload`，禁止留孤儿分片，因为会持续计费。
+- `autoUpload` 为 false 时必须完全跳过拦截与补传，禁止排队或静默上传，因为用户明确暂停意味着不产生任何网络请求。
+- 设置页保存必须先通过凭证校验再持久化，禁止存入无效凭证，因为后续上传会静默失败且用户难以定位原因。
 
 ## 规则
 
@@ -92,6 +100,7 @@ Reading View 用 `registerMarkdownPostProcessor` 遍历 `img/video/audio/a`，Li
 - 推荐用私有 Bucket + 客户端 V1 签名，因为无需服务端且 URL 短。
 - 推荐签名 URL 内存缓存（LRU，key→{url, expireAt}），因为可减少滚动时的重复签名开销。
 - 推荐上传失败保留本地文件并在状态栏提示重试，因为可避免网络抖动造成数据丢失。
-- 推荐 MVP 先只做 Reading View + 图片，后续再扩展 Live Preview 与其他媒体，因为 CM6 装饰器开发成本高。
-- 推荐提供"一键迁移已有附件"命令，因为存量 vault 无法靠事件感知补齐。
+- 推荐提供"迁移指定文件夹附件"和"迁移全部附件"两条命令，因为支持先小范围验证再全量迁移。
+- 推荐凭证校验用 `requestUrl HEAD /{bucket}.{endpoint}/` 或 `GET /?list-type=2&max-keys=0`，因为开销最小且能同时验证 Bucket 可达与签名有效。
+- 推荐 `autoUpload` 开关变更时在状态栏展示当前状态图标，因为可让用户随时确认上传是否启用。
 - 推荐语言简洁凝练，因为节省token

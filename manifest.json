@@ -1,0 +1,10 @@
+{
+  "id": "unchanged-attachments-to-oss",
+  "name": "Unchanged Attachments to OSS",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "将 Obsidian 中图片/视频/音频/PDF 附件自动上传到阿里云 OSS，替换本地引用为动态签名 URL。",
+  "author": "xukai",
+  "authorUrl": "https://github.com/xukai",
+  "isDesktopOnly": false
+}
