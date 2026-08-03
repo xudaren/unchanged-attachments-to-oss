@@ -1,6 +1,7 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type OssPlugin from "./main";
 import { OssClient } from "./oss/client";
+import { formatCredentialNotice } from "./oss/errors";
 
 /** 凭证相关字段的草稿缓冲 */
 interface CredentialDraft {
@@ -212,8 +213,8 @@ export class OssSettingTab extends PluginSettingTab {
       notice.setMessage("凭证校验通过，已保存");
       setTimeout(() => notice.hide(), 3000);
     } catch (err) {
-      notice.setMessage(`凭证校验失败，未保存：${(err as Error).message}`);
-      setTimeout(() => notice.hide(), 5000);
+      notice.setMessage(formatCredentialNotice(err));
+      setTimeout(() => notice.hide(), 10000);
     }
   }
 }

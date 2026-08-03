@@ -1,6 +1,7 @@
 # build output
 node_modules/
 main.js
+.test-dist/
 *.log
 
 # obsidian

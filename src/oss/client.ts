@@ -1,6 +1,9 @@
 import { requestUrl, RequestUrlParam, RequestUrlResponse } from "obsidian";
 import { PluginSettings } from "../types";
 import { encodeKey, sign } from "./signer";
+import { CredentialVerificationError, OssError } from "./errors";
+
+export { OssError } from "./errors";
 
 export interface OssRequestOptions {
   method: "GET" | "PUT" | "POST" | "DELETE" | "HEAD";
@@ -23,13 +26,21 @@ export interface ListedMultipartUpload {
 
 /** OSS REST 客户端，全部走 requestUrl，跨平台且绕 CORS。 */
 export class OssClient {
-  constructor(private readonly settings: PluginSettings) {}
+  constructor(
+    private readonly settings: PluginSettings,
+    private readonly sendRequest: typeof requestUrl = requestUrl,
+  ) {}
+
+  /** 不经过 CNAME 的标准 Bucket Host，用于隔离凭证与自定义域名问题。 */
+  private get standardHost(): string {
+    const endpoint = this.settings.endpoint || `${this.settings.region}.aliyuncs.com`;
+    return `${this.settings.bucketName}.${endpoint}`;
+  }
 
   /** 请求 host：优先 CNAME，其次 bucket.endpoint */
   private get host(): string {
     if (this.settings.cname) return this.settings.cname;
-    const endpoint = this.settings.endpoint || `${this.settings.region}.aliyuncs.com`;
-    return `${this.settings.bucketName}.${endpoint}`;
+    return this.standardHost;
   }
 
   /** GetObject 的签名 host（可能是 CNAME） */
@@ -38,17 +49,17 @@ export class OssClient {
   }
 
   /** 拼装完整 URL。query 顺序不影响签名，但影响可读性 */
-  private buildUrl(key: string, query?: Record<string, string>): string {
+  private buildUrl(key: string, query?: Record<string, string>, host = this.host): string {
     const qs = query
       ? "?" +
         Object.entries(query)
           .map(([k, v]) => (v === "" ? encodeURIComponent(k) : `${encodeURIComponent(k)}=${encodeURIComponent(v)}`))
           .join("&")
       : "";
-    return `https://${this.host}/${encodeKey(key)}${qs}`;
+    return `https://${host}/${encodeKey(key)}${qs}`;
   }
 
-  private async doRequest(opts: OssRequestOptions): Promise<RequestUrlResponse> {
+  private async doRequest(opts: OssRequestOptions, host = this.host): Promise<RequestUrlResponse> {
     const date = new Date().toUTCString();
     const ossHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(opts.extraHeaders ?? {})) {
@@ -74,13 +85,13 @@ export class OssClient {
     if (opts.contentType) headers["Content-Type"] = opts.contentType;
 
     const req: RequestUrlParam = {
-      url: this.buildUrl(opts.key, opts.query),
+      url: this.buildUrl(opts.key, opts.query, host),
       method: opts.method,
       headers,
       body: opts.body,
       throw: false,
     };
-    const resp = await requestUrl(req);
+    const resp = await this.sendRequest(req);
     if (resp.status < 200 || resp.status >= 300) {
       throw new OssError(resp.status, resp.text, opts.method, opts.key);
     }
@@ -164,23 +175,26 @@ export class OssClient {
    * 正常返回 true；签名/网络/权限异常则抛出 OssError。
    */
   async verifyCredentials(): Promise<boolean> {
-    await this.doRequest({
+    const request: OssRequestOptions = {
       method: "GET",
       key: "",
-      query: { "list-type": "2", "max-keys": "0" },
-    });
-    return true;
-  }
-}
+      query: { "list-type": "2", "max-keys": "1" },
+    };
 
-export class OssError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly body: string,
-    method: string,
-    key: string,
-  ) {
-    super(`OSS ${method} /${key} → ${status}: ${extractXmlTag(body, "Code") ?? body.slice(0, 200)}`);
+    try {
+      await this.doRequest(request, this.standardHost);
+    } catch (error) {
+      throw new CredentialVerificationError("oss", this.standardHost, error);
+    }
+
+    if (this.settings.cname) {
+      try {
+        await this.doRequest(request, this.settings.cname);
+      } catch (error) {
+        throw new CredentialVerificationError("cname", this.settings.cname, error);
+      }
+    }
+    return true;
   }
 }
 
