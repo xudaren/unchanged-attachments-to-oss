@@ -1,0 +1,21 @@
+/*
+ * Obsidian 会为 Markdown 图片语法先创建原生 img，并立即请求 oss://。
+ * Live Preview / Reading View 随后会生成或替换为签名 HTTPS 地址。
+ * 隐藏原生自定义协议节点，避免 ERR_UNKNOWN_URL_SCHEME 的破图占位；
+ * 签名后的 https:// 媒体元素不匹配此选择器，正常显示。
+ */
+.markdown-source-view img[src^="oss://"],
+.markdown-reading-view img[src^="oss://"],
+.canvas-node img[src^="oss://"] {
+  display: none;
+}
+
+.oss-render-error {
+  display: inline-block;
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-error);
+  border-radius: 4px;
+  color: var(--text-error);
+  background: var(--background-modifier-error-hover);
+  font-size: var(--font-ui-small);
+}

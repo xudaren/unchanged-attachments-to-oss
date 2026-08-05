@@ -152,8 +152,8 @@ export class OssSettingTab extends PluginSettingTab {
             const n = parseInt(v, 10);
             if (Number.isFinite(n) && n > 0) {
               plugin.settings.signedUrlExpireSeconds = n;
+              plugin.urlResolver.clear();
               await plugin.saveSettings();
-              plugin.urlCache.clear();
             }
           }),
       );
@@ -207,9 +207,10 @@ export class OssSettingTab extends PluginSettingTab {
       plugin.settings.accessKeySecret = accessKeySecret;
       plugin.settings.endpoint = endpoint;
       plugin.settings.cname = cname;
-      await plugin.saveSettings();
       // 刷新主 client 实例以使用新凭证
       plugin.client = new OssClient(plugin.settings);
+      plugin.urlResolver.clear();
+      await plugin.saveSettings();
       notice.setMessage("凭证校验通过，已保存");
       setTimeout(() => notice.hide(), 3000);
     } catch (err) {
