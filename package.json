@@ -7,9 +7,14 @@
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "typecheck": "tsc -noEmit -skipLibCheck",
-    "test": "node tests/build-tests.mjs && node --test .test-dist/*.test.js"
+    "test": "node tests/build-tests.mjs && node --test .test-dist/**/*.test.js"
   },
-  "keywords": ["obsidian", "plugin", "oss", "aliyun"],
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "oss",
+    "aliyun"
+  ],
   "author": "xukai",
   "license": "MIT",
   "devDependencies": {

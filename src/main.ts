@@ -1,9 +1,11 @@
 import { FuzzySuggestModal, Notice, Plugin, TFolder } from "obsidian";
 import { DeleteWatcher } from "./delete/watcher";
 import { OssClient } from "./oss/client";
-import { createOssLivePreviewPlugin } from "./render/live-preview";
+import { findRenderSurfaces, hydrateOssSubtree, selectMutationRoots } from "./render/dom-renderer";
 import { createOssPostProcessor } from "./render/post-processor";
 import { SignedUrlCache } from "./render/url-cache";
+import { SignedUrlResolver } from "./render/url-resolver";
+import { clearHmacKeyCache } from "./oss/signer";
 import { OssSettingTab } from "./settings";
 import { DEFAULT_SETTINGS, PluginSettings } from "./types";
 import { AttachmentInterceptor } from "./upload/interceptor";
@@ -17,6 +19,7 @@ export default class OssPlugin extends Plugin {
   client!: OssClient;
   uploadManager!: UploadManager;
   urlCache!: SignedUrlCache;
+  urlResolver!: SignedUrlResolver;
   progressBar!: UploadProgressBar;
   autoUploadIndicator!: AutoUploadIndicator;
   retryIndicator!: RetryIndicator;
@@ -34,6 +37,16 @@ export default class OssPlugin extends Plugin {
 
     this.client = new OssClient(this.settings);
     this.urlCache = new SignedUrlCache();
+    this.urlResolver = new SignedUrlResolver(
+      () => ({
+        bucket: this.settings.bucketName,
+        host: this.client.signedUrlHost,
+        accessKeyId: this.settings.accessKeyId,
+        accessKeySecret: this.settings.accessKeySecret,
+        expireSeconds: this.settings.signedUrlExpireSeconds,
+      }),
+      this.urlCache,
+    );
     this.progressBar = new UploadProgressBar(this);
     this.uploadManager = new UploadManager(this.client, this.settings, () => this.saveSettings());
 
@@ -69,12 +82,33 @@ export default class OssPlugin extends Plugin {
     });
 
     this.registerMarkdownPostProcessor(
-      createOssPostProcessor(this.settings, this.client, this.urlCache),
+      createOssPostProcessor(this.settings, this.urlResolver),
     );
 
-    this.registerEditorExtension(
-      createOssLivePreviewPlugin(this.settings, this.client, this.urlCache),
-    );
+    let renderObserver: MutationObserver | null = null;
+    let renderDisposed = false;
+    this.app.workspace.onLayoutReady(() => {
+      if (renderDisposed) return;
+      renderObserver = new MutationObserver((records) => {
+        for (const root of selectMutationRoots(records)) {
+          void hydrateOssSubtree(root, this.urlResolver);
+        }
+      });
+      renderObserver.observe(this.app.workspace.containerEl, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["src", "href"],
+      });
+      for (const root of findRenderSurfaces(this.app.workspace.containerEl)) {
+        void hydrateOssSubtree(root, this.urlResolver);
+      }
+    });
+    this.register(() => {
+      renderDisposed = true;
+      renderObserver?.disconnect();
+      clearHmacKeyCache();
+    });
 
     this.addSettingTab(new OssSettingTab(this.app, this));
 

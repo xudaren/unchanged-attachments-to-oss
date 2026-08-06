@@ -8,6 +8,9 @@ main.js
 .obsidian/plugins/*/data.json
 data.json
 
+# docs
+docs/
+
 # ide
 .vscode/
 .idea/

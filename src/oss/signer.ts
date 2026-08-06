@@ -9,6 +9,11 @@
  * 全部使用 Web Crypto，兼容 Obsidian 移动端。
  */
 
+import { HmacKeyCache } from "./hmac-key-cache";
+
+const encoder = new TextEncoder();
+const hmacKeyCache = new HmacKeyCache();
+
 /** 参与签名的 OSS 子资源白名单（按字母序） */
 const SIGNED_SUBRESOURCES = new Set([
   "acl", "append", "bucketInfo", "callback", "callback-var", "cname",
@@ -69,16 +74,14 @@ export function buildStringToSign(input: SignInput): string {
 
 /** HMAC-SHA1 + base64，返回签名字符串 */
 export async function hmacSha1Base64(secret: string, message: string): Promise<string> {
-  const enc = new TextEncoder();
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-1" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
+  const cryptoKey = await hmacKeyCache.get(secret);
+  const sig = await crypto.subtle.sign("HMAC", cryptoKey, encoder.encode(message));
   return arrayBufferToBase64(sig);
+}
+
+/** Drop the in-memory imported key when the plugin unloads. */
+export function clearHmacKeyCache(): void {
+  hmacKeyCache.clear();
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {

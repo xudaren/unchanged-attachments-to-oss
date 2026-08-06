@@ -1,0 +1,52 @@
+/* Hide Obsidian's temporary custom-protocol image before hydration. */
+.markdown-source-view img[src^="oss://"],
+.markdown-reading-view img[src^="oss://"],
+.canvas-node img[src^="oss://"] {
+  display: none;
+}
+
+.oss-render-error {
+  display: inline-block;
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-error);
+  border-radius: 4px;
+  color: var(--text-error);
+  background: var(--background-modifier-error-hover);
+  font-size: var(--font-ui-small);
+}
+
+.oss-pdf-attachment {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 42px;
+  padding: 6px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+}
+
+.oss-pdf-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oss-pdf-open {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-radius: var(--radius-s);
+  background: var(--interactive-normal);
+  color: var(--text-normal);
+  text-decoration: none;
+}
+
+.oss-pdf-open:hover,
+.oss-pdf-open:focus-visible {
+  background: var(--interactive-hover);
+  color: var(--text-normal);
+}
