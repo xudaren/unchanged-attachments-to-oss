@@ -11,6 +11,9 @@ data.json
 # docs
 docs/
 
+# claude code agent state
+.claude/
+
 # ide
 .vscode/
 .idea/
