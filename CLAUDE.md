@@ -20,6 +20,8 @@
 
 - 设置页保存时对 OSS 凭证进行连通性校验（ping），验证 AK/SK 有效性，校验失败提前报错阻止保存
 
+对应的 Obsidian 测试路径为：/Users/xukai/xukai_workspace/许凯测试oss插件
+
 # 为什么
 
 >描述功能的意义，按以下维度展开：
