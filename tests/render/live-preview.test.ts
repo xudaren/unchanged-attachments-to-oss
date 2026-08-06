@@ -12,7 +12,7 @@ test("uses one incremental observer for Live Preview and Canvas", () => {
   );
   assert.match(source, /new MutationObserver\(\(records\)/);
   assert.match(source, /selectMutationRoots\(records\)/);
-  assert.match(source, /hydrateOssSubtree\(root, this\.urlResolver\)/);
+  assert.match(source, /hydrateOssSubtree\(root, this\.urlResolver, undefined, this\.attachmentContextMenu\)/);
   assert.match(source, /renderObserver\.observe\(this\.app\.workspace\.containerEl/);
   assert.match(source, /attributeFilter:\s*\["src", "href"\]/);
   assert.match(source, /let renderDisposed = false/);

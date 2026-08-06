@@ -1,5 +1,5 @@
 import { Notice } from "obsidian";
-import { OssClient } from "../oss/client";
+import { OssClient, OssError } from "../oss/client";
 import { PendingUpload, PluginSettings, mimeOf } from "../types";
 
 const PART_SIZE = 4 * 1024 * 1024; // 4 MB
@@ -13,8 +13,12 @@ export interface UploadRequest {
   ext: string;
   /** 关联 md 文件路径（失败回写用） */
   sourcePath: string;
+  /** 已落地本地附件路径；续传身份校验用 */
+  localPath?: string;
   /** 已存在的续传状态（可选） */
   resume?: PendingUpload;
+  /** 引用实例标识，用于区分同一文档内的重复引用 */
+  occurrenceId?: string;
   /** 进度回调：参数为已完成分片数和总分片数 */
   onProgress?: (done: number, total: number) => void;
 }
@@ -22,6 +26,13 @@ export interface UploadRequest {
 export interface UploadResult {
   objectKey: string;
   tempId: string;
+}
+
+export class UploadPausedError extends Error {
+  constructor(public readonly tempId: string, cause: unknown) {
+    super(`上传已暂停，可稍后续传：${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "UploadPausedError";
+  }
 }
 
 /**
@@ -43,7 +54,7 @@ export class UploadManager {
    */
   async upload(req: UploadRequest): Promise<UploadResult> {
     const size = req.blob.size;
-    let pending = req.resume;
+    let pending = req.resume ?? this.findResume(req);
     if (!pending) {
       const tempId = crypto.randomUUID();
       const prefix = this.settings.objectKeyPrefix || "obsidian";
@@ -56,12 +67,20 @@ export class UploadManager {
         ext: req.ext.toLowerCase(),
         size,
         parts: [],
+        phase: "uploading",
         sourcePath: req.sourcePath,
+        occurrenceId: req.occurrenceId,
+        localPath: req.localPath,
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
       this.settings.pendingUploads[tempId] = pending;
       await this.persist();
+    }
+
+    // OSS 对象已经完成，仅重试引用提交，不得重复上传。
+    if (pending.phase === "uploaded") {
+      return { tempId: pending.tempId, objectKey: pending.objectKey };
     }
 
     const totalParts = Math.max(1, Math.ceil(size / PART_SIZE));
@@ -82,6 +101,7 @@ export class UploadManager {
             partNumber: n,
             body: buf,
           }),
+          isRecoverableUploadError,
         );
         pending.parts.push({ partNumber: n, etag });
         pending.updatedAt = Date.now();
@@ -95,17 +115,20 @@ export class UploadManager {
           uploadId: pending!.uploadId,
           parts: pending!.parts,
         }),
+        isRecoverableUploadError,
       );
 
-      const tempId = pending.tempId;
-      const objectKey = pending.objectKey;
-      delete this.settings.pendingUploads[tempId];
+      pending.phase = "uploaded";
+      pending.updatedAt = Date.now();
       await this.persist();
-      return { tempId, objectKey };
+      return { tempId: pending.tempId, objectKey: pending.objectKey };
     } catch (err) {
-      // 文档硬约束：上传失败或用户取消时必须 AbortMultipartUpload，禁止留孤儿分片。
-      // withRetry 已做最多 4 次重试仍失败，认定不可恢复，立即 abort 并清 pending。
-      console.error("[oss-upload] 分片上传失败，触发 Abort", err);
+      if (isRecoverableUploadError(err)) {
+        pending.updatedAt = Date.now();
+        await this.persist();
+        throw new UploadPausedError(pending.tempId, err);
+      }
+      console.error("[oss-upload] 不可恢复错误，触发 Abort", err);
       try {
         await this.client.abortMultipart(pending.objectKey, pending.uploadId);
       } catch (abortErr) {
@@ -115,6 +138,32 @@ export class UploadManager {
       await this.persist();
       throw err;
     }
+  }
+
+  async bindLocalPath(tempId: string, localPath: string): Promise<void> {
+    const pending = this.settings.pendingUploads[tempId];
+    if (!pending) return;
+    pending.localPath = localPath;
+    pending.updatedAt = Date.now();
+    await this.persist();
+  }
+
+  /** 引用提交及本地清理全部成功后结束任务。 */
+  async finalize(tempId: string): Promise<void> {
+    if (!this.settings.pendingUploads[tempId]) return;
+    delete this.settings.pendingUploads[tempId];
+    await this.persist();
+  }
+
+  private findResume(req: UploadRequest): PendingUpload | undefined {
+    if (!req.localPath) return undefined;
+    return Object.values(this.settings.pendingUploads).find((pending) =>
+      pending.localPath === req.localPath &&
+      pending.sourcePath === req.sourcePath &&
+      pending.occurrenceId === req.occurrenceId &&
+      pending.size === req.blob.size &&
+      pending.ext === req.ext.toLowerCase()
+    );
   }
 
   /** 主动放弃某个未完成上传：调 Abort 并清状态 */
@@ -137,6 +186,8 @@ export class UploadManager {
 
     // 1. 本地 pending 中 24h 未更新的
     for (const [tempId, p] of Object.entries(this.settings.pendingUploads)) {
+      // 已完成对象不是孤儿分片，必须保留到引用提交成功。
+      if (p.phase === "uploaded") continue;
       if (now - p.updatedAt > maxAgeMs) {
         await this.abort(tempId);
         cleaned++;
@@ -170,13 +221,17 @@ export class UploadManager {
 }
 
 /** 指数退避重试：最多 MAX_RETRIES 次，延迟 1s → 2s → 4s */
-async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  shouldRetry: (error: unknown) => boolean = () => true,
+): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
+      if (!shouldRetry(err)) throw err;
       if (attempt < MAX_RETRIES) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         await sleep(delay);
@@ -188,4 +243,9 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function isRecoverableUploadError(error: unknown): boolean {
+  if (!(error instanceof OssError)) return true;
+  return error.status === 408 || error.status === 429 || error.status >= 500;
 }

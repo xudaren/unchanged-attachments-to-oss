@@ -150,18 +150,50 @@ test("replaces a PDF placeholder with the shared browser link", async () => {
   };
   const pdfHost = { className: "oss-pdf-viewer" };
   const mounts: string[] = [];
+  const names: Array<string | undefined> = [];
+  image.setAttribute("alt", "百鸟数据-声纹检测报告.pdf");
 
   await hydrateOssSubtree(image as unknown as ParentNode, {
     resolve: async () => "https://signed.example/vault/a.pdf",
   }, {
-    mount: (_from, url) => {
+    mount: (_from, url, _key, displayName) => {
       mounts.push(url);
+      names.push(displayName);
       return pdfHost as unknown as HTMLElement;
     },
   });
 
   assert.deepEqual(mounts, ["https://signed.example/vault/a.pdf"]);
+  assert.deepEqual(names, ["百鸟数据-声纹检测报告.pdf"]);
   assert.equal(image.replacement, pdfHost);
+});
+
+test("expands a Live Preview PDF host without replacing its editable CodeMirror node", async () => {
+  const image = mediaElement("IMG", "oss://vault/a.pdf") as ReturnType<typeof mediaElement> & {
+    replacement?: unknown;
+    closest(selector: string): Element | null;
+  };
+  const hostClasses: string[] = [];
+  const lineClasses: string[] = [];
+  const embedHost = { classList: { add: (name: string) => hostClasses.push(name) } };
+  const line = { classList: { add: (name: string) => lineClasses.push(name) } };
+  image.closest = (selector: string) => {
+    if (selector === ".markdown-source-view") return {} as Element;
+    if (selector.includes(".cm-embed-block")) return embedHost as unknown as Element;
+    if (selector === ".cm-line") return line as unknown as Element;
+    return null;
+  };
+  const pdfCard = { className: "oss-pdf-attachment" };
+
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/vault/a.pdf",
+  }, {
+    mount: () => pdfCard as unknown as HTMLElement,
+  });
+
+  assert.deepEqual(hostClasses, ["oss-pdf-live-preview-host"]);
+  assert.deepEqual(lineClasses, ["oss-pdf-live-preview-line"]);
+  assert.equal(image.replacement, pdfCard);
 });
 
 test("replaces an existing PDF embed with the shared browser link", async () => {

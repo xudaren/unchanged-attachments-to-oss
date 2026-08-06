@@ -5,6 +5,7 @@ import { clearOssRenderError, showOssRenderError } from "./error-state";
 import { ossKeyFromImageSource } from "./oss-source";
 import { SignedUrlResolver } from "./url-resolver";
 import { defaultPdfRenderer, PdfRenderer } from "./pdf-link";
+import type { AttachmentContextMenuBinder, AttachmentKind } from "./context-menu";
 
 /**
  * Reading View 后处理：遍历 <img>/<video>/<audio>/<a>，
@@ -14,8 +15,9 @@ export function createOssPostProcessor(
   settings: PluginSettings,
   resolver: SignedUrlResolver,
   pdfRenderer: PdfRenderer = defaultPdfRenderer,
+  contextMenu?: AttachmentContextMenuBinder,
 ) {
-  return async function processor(el: HTMLElement, _ctx: MarkdownPostProcessorContext) {
+  return async function processor(el: HTMLElement, ctx: MarkdownPostProcessorContext) {
     // Live Preview 与 Canvas 由增量 Observer 独占，避免同一节点被两条管线重复处理。
     if (el.closest(RENDER_SURFACE_SELECTOR)) return;
 
@@ -23,7 +25,7 @@ export function createOssPostProcessor(
     // 我们统一按 src / href 属性扫一遍
     const nodes = collectOssNodes(el);
     const results = await Promise.allSettled(
-      nodes.map((node) => hydrateNode(node, settings, resolver, pdfRenderer)),
+      nodes.map((node) => hydrateNode(node, settings, resolver, pdfRenderer, contextMenu, ctx.sourcePath)),
     );
     results.forEach((result, index) => {
       if (result.status !== "rejected") return;
@@ -75,6 +77,8 @@ async function hydrateNode(
   settings: PluginSettings,
   resolver: SignedUrlResolver,
   pdfRenderer: PdfRenderer,
+  contextMenu?: AttachmentContextMenuBinder,
+  sourcePath?: string,
 ): Promise<void> {
   if (node.key.startsWith("uploading/")) return;
   if (!settings.bucketName || !settings.accessKeyId || !settings.accessKeySecret) {
@@ -95,6 +99,7 @@ async function hydrateNode(
     const desired = mediaKindOfExt(ext);
     if (desired === "embed" || (desired && desired !== node.kind && (node.kind === "img" || node.kind === "a"))) {
       const replaced = buildMediaElement(desired, url, node.el, node.key, pdfRenderer);
+      contextMenu?.bind(replaced, contextKind(desired), url, node.key, sourcePath);
       node.el.replaceWith(replaced);
     } else if (node.kind === "img") {
       (node.el as HTMLImageElement).src = url;
@@ -105,6 +110,9 @@ async function hydrateNode(
       (node.el as HTMLAnchorElement).target = "_blank";
     } else if (node.kind === "embed") {
       (node.el as HTMLEmbedElement).src = url;
+    }
+    if (desired && !(desired === "embed" || (desired !== node.kind && (node.kind === "img" || node.kind === "a")))) {
+      contextMenu?.bind(node.el as HTMLElement, contextKind(desired), url, node.key, sourcePath);
     }
   } catch (error) {
     if (html.dataset.ossSigningKey !== node.key || currentOssKey(node) !== node.key) return;
@@ -126,10 +134,14 @@ function keyExt(key: string): string {
 
 type MediaKind = "img" | "video" | "audio" | "embed";
 
+function contextKind(kind: MediaKind): AttachmentKind {
+  return kind === "embed" ? "pdf" : kind;
+}
+
 function mediaKindOfExt(ext: string): MediaKind | null {
-  if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(ext)) return "img";
-  if (["mp4", "mov", "webm", "mkv"].includes(ext)) return "video";
-  if (["mp3", "wav", "m4a", "ogg", "flac"].includes(ext)) return "audio";
+  if (["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp"].includes(ext)) return "img";
+  if (["mp4", "mov", "webm", "mkv", "ogv", "m4v"].includes(ext)) return "video";
+  if (["mp3", "wav", "m4a", "ogg", "flac", "aac", "opus"].includes(ext)) return "audio";
   if (ext === "pdf") return "embed";
   return null;
 }
@@ -161,5 +173,5 @@ function buildMediaElement(
     return a;
   }
   // pdf
-  return pdfRenderer.mount(from, url, key);
+  return pdfRenderer.mount(from, url, key, from.getAttribute("alt") ?? from.textContent ?? undefined);
 }

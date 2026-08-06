@@ -6,10 +6,14 @@ import {
   TFile,
   Vault,
 } from "obsidian";
-import { UploadManager } from "./manager";
+import { UploadManager, UploadPausedError } from "./manager";
 import { UploadProgressBar } from "./progress";
 import { RetryEntry, RetryIndicator } from "./indicator";
 import { isSupportedExt, PluginSettings } from "../types";
+import {
+  findResolvedAttachmentOccurrences,
+  replaceOneResolvedAttachmentReference,
+} from "./links";
 
 /**
  * 附件拦截器：
@@ -49,6 +53,7 @@ export class AttachmentInterceptor {
     const files = clipboardFiles(evt);
     const supported = files.filter((f) => isSupportedExt(extOf(f.name, f.type)));
     if (supported.length === 0) return;
+    if (supported.length !== files.length || hasClipboardText(evt)) return;
     evt.preventDefault();
     for (const file of supported) {
       await this.uploadAndInsert(file, editor, view);
@@ -60,6 +65,7 @@ export class AttachmentInterceptor {
     const files = Array.from(evt.dataTransfer?.files ?? []);
     const supported = files.filter((f) => isSupportedExt(extOf(f.name, f.type)));
     if (supported.length === 0) return;
+    if (supported.length !== files.length) return;
     evt.preventDefault();
     for (const file of supported) {
       await this.uploadAndInsert(file, editor, view);
@@ -70,24 +76,31 @@ export class AttachmentInterceptor {
   private async uploadAndInsert(file: File, editor: Editor, view: MarkdownView): Promise<void> {
     const ext = extOf(file.name, file.type);
     const sourcePath = view.file?.path ?? "";
-    const placeholder = `![上传中 ${file.name}](oss://uploading/${crypto.randomUUID()})`;
+    const occurrenceId = crypto.randomUUID();
+    const placeholder = `![上传中 ${file.name}](oss://uploading/${occurrenceId})`;
     const insertPos = editor.getCursor();
     editor.replaceRange(placeholder, insertPos);
     const notice = new Notice(`上传中：${file.name} (${formatSize(file.size)})`, 0);
+    let taskTempId: string | undefined;
 
     try {
-      const { objectKey } = await this.manager.upload({
+      const { objectKey, tempId } = await this.manager.upload({
         blob: file,
         ext,
         sourcePath,
+        occurrenceId,
         onProgress: (done, total) => {
           this.progress?.begin(file.name, total);
           this.progress?.advance(done);
         },
       });
+      taskTempId = tempId;
       this.progress?.finish();
       const finalLink = `![${escapeAlt(file.name)}](oss://${objectKey})`;
-      replaceInEditor(editor, placeholder, finalLink);
+      if (!replaceInEditor(editor, placeholder, finalLink)) {
+        throw new Error("上传已完成，但上传占位符已被修改或删除");
+      }
+      await this.manager.finalize(tempId);
       notice.setMessage(`已上传：${file.name}`);
       setTimeout(() => notice.hide(), 2000);
     } catch (err) {
@@ -98,11 +111,14 @@ export class AttachmentInterceptor {
       replaceInEditor(editor, placeholder, "");
       const localPath = await writeLocalAttachment(this.plugin.app.vault, view.file, file);
       if (localPath) {
+        const pendingTempId = err instanceof UploadPausedError ? err.tempId : taskTempId;
+        if (pendingTempId) await this.manager.bindLocalPath(pendingTempId, localPath);
         editor.replaceRange(`![[${localPath}]]`, insertPos);
         this.retryIndicator?.push({
           mdPath: sourcePath,
           localPath,
           ext,
+          occurrenceId,
         });
         new Notice(`上传失败，已回写本地：${localPath}（可在状态栏点击重试）`);
       } else {
@@ -118,37 +134,57 @@ export class AttachmentInterceptor {
     if (!isSupportedExt(file.extension)) return;
     if (isInPendingObjectKey(file.path, this.settings)) return; // 避免误处理插件内部产物
 
-    // 简单去抖：Obsidian 刚创建的文件可能还在写入，稍等 300ms
-    await sleep(300);
+    const occurrences = await waitForOccurrences(this.plugin, file);
+    if (occurrences.length === 0) return;
 
     const notice = new Notice(`兜底上传：${file.name}`, 0);
+    let blob: Blob;
     try {
-      const buf = await this.plugin.app.vault.readBinary(file);
-      const blob = new Blob([buf]);
-      const linkedFrom = this.findLinkedMd(file.path);
-      const { objectKey } = await this.manager.upload({
-        blob,
-        ext: file.extension,
-        sourcePath: linkedFrom ?? "",
-      });
-      // 替换所有引用
-      if (linkedFrom) {
-        await replaceLocalRefWithOss(this.plugin.app.vault, linkedFrom, file, objectKey);
+      blob = new Blob([await this.plugin.app.vault.readBinary(file)]);
+    } catch (error) {
+      console.error("[oss] 读取兜底附件失败", file.path, error);
+      notice.setMessage(`兜底上传失败（保留本地）：无法读取 ${file.name}`);
+      setTimeout(() => notice.hide(), 4000);
+      return;
+    }
+    let failed = 0;
+    for (const occurrence of occurrences) {
+      try {
+        const { objectKey, tempId } = await this.manager.upload({
+          blob,
+          ext: file.extension,
+          sourcePath: occurrence.sourcePath,
+          localPath: file.path,
+          occurrenceId: occurrence.occurrenceId,
+        });
+        const replaced = await replaceOneResolvedAttachmentReference(
+          this.plugin.app.vault,
+          this.plugin.app.metadataCache,
+          file,
+          occurrence.sourcePath,
+          objectKey,
+        );
+        if (!replaced) throw new Error("引用实例未能确认替换");
+        await this.manager.finalize(tempId);
+      } catch (err) {
+        failed++;
+        console.error("[oss] 引用实例兜底上传失败", occurrence, err);
+        this.retryIndicator?.push({
+          mdPath: occurrence.sourcePath,
+          localPath: file.path,
+          ext: file.extension,
+          occurrenceId: occurrence.occurrenceId,
+        });
       }
+    }
+    if (failed === 0) {
       await this.plugin.app.vault.delete(file);
-      notice.setMessage(`兜底上传完成：${file.name}`);
+      notice.setMessage(`兜底上传完成：${file.name}（${occurrences.length} 个独立引用）`);
       setTimeout(() => notice.hide(), 2000);
-    } catch (err) {
-      console.error("[oss] 兜底路径上传失败，保留本地", err);
-      notice.setMessage(`兜底上传失败（保留本地）：${(err as Error).message}`);
+    } else {
+      notice.setMessage(`兜底上传部分失败：${failed}/${occurrences.length}（已保留本地）`);
       setTimeout(() => notice.hide(), 4000);
     }
-  }
-
-  /** 查找当前打开视图中引用了该附件的 md 路径 */
-  private findLinkedMd(attachmentPath: string): string | null {
-    const active = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-    return active?.file?.path ?? null;
   }
 
   /**
@@ -167,15 +203,26 @@ export class AttachmentInterceptor {
       try {
         const buf = await vault.readBinary(file);
         const blob = new Blob([buf]);
-        const { objectKey } = await this.manager.upload({
+        const { objectKey, tempId } = await this.manager.upload({
           blob,
           ext: entry.ext,
           sourcePath: entry.mdPath,
+          localPath: entry.localPath,
+          occurrenceId: entry.occurrenceId,
         });
-        if (entry.mdPath) {
-          await replaceLocalRefWithOss(vault, entry.mdPath, file, objectKey);
+        const replaced = await replaceOneResolvedAttachmentReference(
+          vault,
+          this.plugin.app.metadataCache,
+          file,
+          entry.mdPath,
+          objectKey,
+        );
+        if (!replaced) {
+          throw new Error(`未找到 ${entry.localPath} 的真实引用，本地文件已保留`);
         }
-        await vault.delete(file);
+        await this.manager.finalize(tempId);
+        const remaining = await findResolvedAttachmentOccurrences(vault, this.plugin.app.metadataCache, file);
+        if (remaining.length === 0) await vault.delete(file);
         new Notice(`重试成功：${entry.localPath}`);
       } catch (err) {
         console.error("[oss-retry] 重试失败", entry, err);
@@ -203,10 +250,22 @@ function clipboardFiles(evt: ClipboardEvent): File[] {
   return files;
 }
 
+function hasClipboardText(evt: ClipboardEvent): boolean {
+  return Boolean(evt.clipboardData?.getData("text/plain") || evt.clipboardData?.getData("text/html"));
+}
+
 function extOf(name: string, mime: string): string {
   const idx = name.lastIndexOf(".");
   if (idx >= 0 && idx < name.length - 1) return name.slice(idx + 1).toLowerCase();
   // 剪贴板截图无文件名时靠 mime 推断
+  const explicitMimeExt: Record<string, string> = {
+    "image/avif": "avif",
+    "video/ogg": "ogv",
+    "video/x-m4v": "m4v",
+    "audio/aac": "aac",
+    "audio/opus": "opus",
+  };
+  if (explicitMimeExt[mime.toLowerCase()]) return explicitMimeExt[mime.toLowerCase()];
   const m = mime.match(/\/([\w.+-]+)$/);
   if (m) {
     const raw = m[1].toLowerCase();
@@ -233,17 +292,31 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function waitForOccurrences(plugin: Plugin, file: TFile) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const occurrences = await findResolvedAttachmentOccurrences(
+      plugin.app.vault,
+      plugin.app.metadataCache,
+      file,
+    );
+    if (occurrences.length > 0) return occurrences;
+    await sleep(300);
+  }
+  return [];
+}
+
 function isInPendingObjectKey(_path: string, _settings: PluginSettings): boolean {
   return false;
 }
 
-function replaceInEditor(editor: Editor, from: string, to: string): void {
+function replaceInEditor(editor: Editor, from: string, to: string): boolean {
   const content = editor.getValue();
   const idx = content.indexOf(from);
-  if (idx < 0) return;
+  if (idx < 0) return false;
   const startPos = editor.offsetToPos(idx);
   const endPos = editor.offsetToPos(idx + from.length);
   editor.replaceRange(to, startPos, endPos);
+  return true;
 }
 
 async function writeLocalAttachment(
@@ -270,32 +343,4 @@ async function writeLocalAttachment(
     console.error("[oss] 本地回写失败", err);
     return null;
   }
-}
-
-async function replaceLocalRefWithOss(
-  vault: Vault,
-  mdPath: string,
-  localFile: TFile,
-  objectKey: string,
-): Promise<void> {
-  const mdFile = vault.getAbstractFileByPath(mdPath);
-  if (!(mdFile instanceof TFile)) return;
-  const content = await vault.read(mdFile);
-  const name = localFile.name;
-  const path = localFile.path;
-  // 匹配 wikilink ![[name]] / ![[path]] 以及 md link ![](name) / ![](path)
-  const patterns = [
-    new RegExp(`!\\[\\[${escapeReg(path)}\\]\\]`, "g"),
-    new RegExp(`!\\[\\[${escapeReg(name)}\\]\\]`, "g"),
-    new RegExp(`!\\[[^\\]]*\\]\\(${escapeReg(path)}\\)`, "g"),
-    new RegExp(`!\\[[^\\]]*\\]\\(${escapeReg(name)}\\)`, "g"),
-  ];
-  const replacement = `![${escapeAlt(name)}](oss://${objectKey})`;
-  let next = content;
-  for (const re of patterns) next = next.replace(re, replacement);
-  if (next !== content) await vault.modify(mdFile, next);
-}
-
-function escapeReg(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

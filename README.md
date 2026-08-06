@@ -7,10 +7,12 @@
 - **自动上传**：粘贴、拖入附件自动上传到 OSS，无需手动操作
 - **动态签名**：私有 Bucket 安全访问，签名 URL 自动缓存、到期前刷新
 - **多端兼容**：PC（Windows/macOS）+ 移动端（iOS/Android）均可使用
-- **断点续传**：大文件分片上传，中断后自动恢复，持久化到 `data.json`
+- **断点续传**：网络、超时和 OSS 5xx 中断会保留分片状态，可从状态栏恢复；24 小时后自动清理
 - **删除联动**：移除 md 中的 OSS 引用时，弹窗确认是否同步删除远端文件
 - **迁移工具**：支持一键迁移全部或指定文件夹的本地附件到 OSS
 - **状态栏指示**：显示自动上传状态和上传进度，支持点击开关
+
+支持的附件格式：图片（png/jpg/jpeg/gif/webp/avif/svg/bmp）、视频（mp4/mov/webm/mkv/ogv/m4v）、音频（mp3/wav/m4a/ogg/flac/aac/opus）和 PDF。Markdown、Canvas 与 Base 保留在 Vault 中，不上传 OSS。
 
 ## 安装
 
@@ -54,12 +56,11 @@ npm run dev   # 监听模式，修改后自动重新构建
 | `accessKeyId` | 是 | Access Key ID |
 | `accessKeySecret` | 是 | Access Key Secret |
 | `endpoint` | 否 | 自定义 Endpoint，默认 `{bucket}.{region}.aliyuncs.com` |
-| `cname` | 否 | CNAME 绑定域名 |
 | `objectKeyPrefix` | 否 | 对象 Key 前缀，默认使用 vault 名称 |
 | `signedUrlExpireSeconds` | 否 | 签名 URL 有效期（秒），默认 3600 |
 | `autoUpload` | 否 | 自动上传开关，默认开启 |
 
-保存时会先通过标准 OSS Endpoint 校验 Bucket、凭证和 `oss:ListObjects` 权限；填写 CNAME 时会再单独校验 CNAME 的 DNS、HTTPS 和 OSS 绑定。任一步失败都会阻止保存，并区分提示凭证、权限、Bucket/Region、请求参数或网络问题。
+保存时会通过标准 OSS Endpoint 访问每次随机的不存在探针 Key，以 `404 NoSuchKey` 验证 Bucket、凭证和 `oss:GetObject` 权限。探针不会列举 Bucket、创建对象或下载真实内容。校验失败会阻止保存，并区分提示凭证、权限、Bucket/Region、请求参数或网络问题。
 
 ## 使用方法
 
@@ -71,7 +72,7 @@ npm run dev   # 监听模式，修改后自动重新构建
 - **删除联动**：从 md 中删除 `oss://` 引用时，弹窗确认是否同步删除 OSS 文件
 - **状态栏**：点击状态栏图标可快速开关自动上传
 
-### PDF 批注说明
+### PDF 说明
 
 Obsidian 原生 PDF 批注功能依赖本地文件，上传到 OSS 后**无法使用原生批注**。
 
@@ -79,9 +80,16 @@ Obsidian 原生 PDF 批注功能依赖本地文件，上传到 OSS 后**无法�
 1. PDF 放本地，先用 Obsidian 原生批注功能完成标注
 2. 批注内容会保存到 companion `.pdf.md` 文件
 3. 命令面板执行 `迁移所有本地附件到 OSS`
-4. 之后 PDF 以 `<embed>` 方式内嵌预览，笔记继续在 companion md 里维护
+4. 之后 PDF 显示为轻量附件行，点击“浏览器打开”，笔记继续在 companion md 里维护
 
-如果你经常批注 PDF，建议在设置中关闭 PDF 上传，保留本地文件。
+如果需要继续使用 Obsidian 原生 PDF 批注，请暂停自动上传，并避免执行包含该 PDF 的迁移命令。
+
+### 数据安全
+
+- 已落地附件只有在所有真实引用完成替换并回读验证后才会删除；找不到引用或任一文档失败时保留本地文件。
+- 引用依据 Obsidian 的链接解析结果识别，不会仅凭同名文件进行全库替换。
+- 迁移会跳过没有真实引用的附件，执行前展示数量并要求确认。
+- 混合粘贴或拖入包含不支持内容时由 Obsidian 默认处理，避免文本或文件被吞掉。
 
 ### 命令面板
 

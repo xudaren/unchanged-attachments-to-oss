@@ -6,8 +6,6 @@ export interface PluginSettings {
   accessKeySecret: string;
   /** 可选：自定义 endpoint（不填则由 region 拼出 oss-{region}.aliyuncs.com） */
   endpoint: string;
-  /** 可选：CNAME 自定义域名。填了则请求与生成的签名 URL host 都用它 */
-  cname: string;
   /** 存储路径前缀，默认 vault 名 */
   objectKeyPrefix: string;
   /** 签名 URL 过期秒数 */
@@ -26,8 +24,14 @@ export interface PendingUpload {
   size: number;
   /** 已成功上传的分片：{partNumber, etag} */
   parts: UploadedPart[];
+  /** uploading=分片未完成；uploaded=OSS 已完成，等待引用提交/本地清理 */
+  phase?: "uploading" | "uploaded";
   /** 关联的 md 文件路径（用于失败回写） */
   sourcePath: string;
+  /** 同一本地附件的引用实例标识；每个实例独占 Object Key */
+  occurrenceId?: string;
+  /** 已落地附件路径；用于插件重启后的安全续传 */
+  localPath?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -43,7 +47,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   accessKeyId: "",
   accessKeySecret: "",
   endpoint: "",
-  cname: "",
   objectKeyPrefix: "",
   signedUrlExpireSeconds: 3600,
   autoUpload: true,
@@ -58,6 +61,7 @@ export const ATTACHMENT_MIME: Record<string, string> = {
   jpeg: "image/jpeg",
   gif: "image/gif",
   webp: "image/webp",
+  avif: "image/avif",
   svg: "image/svg+xml",
   bmp: "image/bmp",
   // video
@@ -65,12 +69,16 @@ export const ATTACHMENT_MIME: Record<string, string> = {
   mov: "video/quicktime",
   webm: "video/webm",
   mkv: "video/x-matroska",
+  ogv: "video/ogg",
+  m4v: "video/x-m4v",
   // audio
   mp3: "audio/mpeg",
   wav: "audio/wav",
   m4a: "audio/mp4",
   ogg: "audio/ogg",
   flac: "audio/flac",
+  aac: "audio/aac",
+  opus: "audio/ogg",
   // doc
   pdf: "application/pdf",
 };

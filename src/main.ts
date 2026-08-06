@@ -13,6 +13,7 @@ import { AutoUploadIndicator, RetryIndicator } from "./upload/indicator";
 import { UploadManager } from "./upload/manager";
 import { migrateAttachments } from "./upload/migrate";
 import { UploadProgressBar } from "./upload/progress";
+import { OssAttachmentContextMenu } from "./render/context-menu";
 
 export default class OssPlugin extends Plugin {
   settings!: PluginSettings;
@@ -23,6 +24,7 @@ export default class OssPlugin extends Plugin {
   progressBar!: UploadProgressBar;
   autoUploadIndicator!: AutoUploadIndicator;
   retryIndicator!: RetryIndicator;
+  attachmentContextMenu!: OssAttachmentContextMenu;
   private interceptor!: AttachmentInterceptor;
   private deleteWatcher!: DeleteWatcher;
 
@@ -49,6 +51,12 @@ export default class OssPlugin extends Plugin {
     );
     this.progressBar = new UploadProgressBar(this);
     this.uploadManager = new UploadManager(this.client, this.settings, () => this.saveSettings());
+    this.deleteWatcher = new DeleteWatcher(this, this.client);
+    this.attachmentContextMenu = new OssAttachmentContextMenu(
+      this,
+      (sourcePath, key, label, removeLocalReference) =>
+        this.deleteWatcher.confirmReferenceRemoval(sourcePath, key, label, removeLocalReference),
+    );
 
     // autoUpload 状态图标（点击切换）
     this.autoUploadIndicator = new AutoUploadIndicator(
@@ -62,9 +70,19 @@ export default class OssPlugin extends Plugin {
     );
 
     // 拦截路径失败重试指示器（延后绑定，避免与 interceptor 循环引用）
-    this.retryIndicator = new RetryIndicator(this, async (entries) => {
-      await this.interceptor.retryEntries(entries);
-    });
+    const persistedRetries = Object.values(this.settings.pendingUploads)
+      .filter((pending) => Boolean(pending.localPath))
+      .map((pending) => ({
+        mdPath: pending.sourcePath,
+        localPath: pending.localPath!,
+        ext: pending.ext,
+        occurrenceId: pending.occurrenceId,
+      }));
+    this.retryIndicator = new RetryIndicator(
+      this,
+      async (entries) => this.interceptor.retryEntries(entries),
+      persistedRetries,
+    );
 
     this.interceptor = new AttachmentInterceptor(
       this,
@@ -75,14 +93,13 @@ export default class OssPlugin extends Plugin {
     );
     this.interceptor.register();
 
-    this.deleteWatcher = new DeleteWatcher(this, this.client);
     // 让删除监听在 workspace layout ready 之后初始化，避免冷启动误报
     this.app.workspace.onLayoutReady(() => {
       void this.deleteWatcher.register();
     });
 
     this.registerMarkdownPostProcessor(
-      createOssPostProcessor(this.settings, this.urlResolver),
+      createOssPostProcessor(this.settings, this.urlResolver, undefined, this.attachmentContextMenu),
     );
 
     let renderObserver: MutationObserver | null = null;
@@ -91,7 +108,7 @@ export default class OssPlugin extends Plugin {
       if (renderDisposed) return;
       renderObserver = new MutationObserver((records) => {
         for (const root of selectMutationRoots(records)) {
-          void hydrateOssSubtree(root, this.urlResolver);
+          void hydrateOssSubtree(root, this.urlResolver, undefined, this.attachmentContextMenu);
         }
       });
       renderObserver.observe(this.app.workspace.containerEl, {
@@ -101,7 +118,7 @@ export default class OssPlugin extends Plugin {
         attributeFilter: ["src", "href"],
       });
       for (const root of findRenderSurfaces(this.app.workspace.containerEl)) {
-        void hydrateOssSubtree(root, this.urlResolver);
+        void hydrateOssSubtree(root, this.urlResolver, undefined, this.attachmentContextMenu);
       }
     });
     this.register(() => {
@@ -151,6 +168,12 @@ export default class OssPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const raw = (await this.loadData()) as Partial<PluginSettings> | null;
     this.settings = { ...DEFAULT_SETTINGS, ...(raw ?? {}) };
+    // 清理旧版已废弃的自定义访问域名配置。
+    const legacy = this.settings as unknown as Record<string, unknown>;
+    if ("cname" in legacy) {
+      delete legacy.cname;
+      await this.saveData(this.settings);
+    }
     // 兼容缺失字段
     if (!this.settings.pendingUploads) this.settings.pendingUploads = {};
     if (this.settings.autoUpload === undefined) this.settings.autoUpload = true;

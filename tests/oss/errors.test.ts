@@ -26,7 +26,7 @@ test("formats OSS error codes as actionable credential messages", () => {
   const cases = [
     ["InvalidAccessKeyId", "AccessKey ID 不存在或已禁用"],
     ["SignatureDoesNotMatch", "AccessKey Secret、Region 或签名配置不匹配"],
-    ["AccessDenied", "缺少 oss:ListObjects 权限"],
+    ["AccessDenied", "缺少探针 Key 的 oss:GetObject 权限"],
     ["NoSuchBucket", "Bucket 不存在，或 Bucket 与 Region/Endpoint 不匹配"],
   ] as const;
 
@@ -69,21 +69,11 @@ test("does not include unrelated secret text", () => {
   assert.doesNotMatch(formatted, /secret-value/);
 });
 
-test("formats the final unsaved notice for OSS and CNAME stages", () => {
+test("formats the final unsaved OSS notice", () => {
   const ossError = new CredentialVerificationError(
     "oss",
     "bucket.oss-cn-shanghai.aliyuncs.com",
     { status: 403, code: "AccessDenied", message: "denied", requestId: "REQ-OSS" },
   );
   assert.match(formatCredentialNotice(ossError), /^凭证校验失败，未保存：OSS 校验失败/);
-
-  const cnameError = new CredentialVerificationError(
-    "cname",
-    "cdn.example.com",
-    new Error("net::ERR_CONNECTION_CLOSED"),
-  );
-  assert.match(
-    formatCredentialNotice(cnameError),
-    /^凭证校验失败，未保存：OSS 凭证有效，但 CNAME 校验失败/,
-  );
 });

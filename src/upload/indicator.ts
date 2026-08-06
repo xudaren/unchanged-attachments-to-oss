@@ -36,6 +36,7 @@ export interface RetryEntry {
   mdPath: string;
   localPath: string;
   ext: string;
+  occurrenceId?: string;
 }
 
 /**
@@ -49,7 +50,9 @@ export class RetryIndicator {
   constructor(
     plugin: Plugin,
     private readonly onRetry: (entries: RetryEntry[]) => Promise<void>,
+    initialEntries: RetryEntry[] = [],
   ) {
+    this.entries.push(...initialEntries);
     this.el = plugin.addStatusBarItem();
     this.el.addClass("oss-retry-indicator");
     this.el.style.cursor = "pointer";

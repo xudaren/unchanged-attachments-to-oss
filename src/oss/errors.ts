@@ -7,7 +7,7 @@ export interface OssErrorDetails {
   argumentValue: string;
 }
 
-export type CredentialVerificationStage = "oss" | "cname";
+export type CredentialVerificationStage = "oss";
 
 export class CredentialVerificationError extends Error {
   constructor(
@@ -15,8 +15,7 @@ export class CredentialVerificationError extends Error {
     public readonly host: string,
     public readonly cause: unknown,
   ) {
-    const prefix = stage === "cname" ? "OSS 凭证有效，但 CNAME 校验失败" : "OSS 校验失败";
-    super(`${prefix}（${host}）`);
+    super(`OSS 校验失败（${host}）`);
     this.name = "CredentialVerificationError";
   }
 }
@@ -60,9 +59,7 @@ export function formatCredentialError(error: unknown, fallbackHost = "OSS"): str
   const verification = isVerificationError(error) ? error : null;
   const cause = verification?.cause ?? error;
   const host = verification?.host ?? fallbackHost;
-  const prefix = verification?.stage === "cname"
-    ? "OSS 凭证有效，但 CNAME 校验失败"
-    : "OSS 校验失败";
+  const prefix = "OSS 校验失败";
 
   const details = asOssErrorDetails(cause);
   if (details) {
@@ -89,7 +86,7 @@ function formatOssReason(details: OssErrorDetails): string {
     case "SignatureDoesNotMatch":
       return "AccessKey Secret、Region 或签名配置不匹配";
     case "AccessDenied":
-      return "凭证有效，但缺少 oss:ListObjects 权限";
+      return "凭证有效，但缺少探针 Key 的 oss:GetObject 权限";
     case "NoSuchBucket":
       return "Bucket 不存在，或 Bucket 与 Region/Endpoint 不匹配";
     case "InvalidArgument": {
@@ -108,7 +105,7 @@ function classifyNetworkError(message: string): string | null {
     return "连接被关闭，请检查网络、代理、域名绑定和 HTTPS 配置";
   }
   if (/ENOTFOUND|ERR_NAME_NOT_RESOLVED|could not resolve|dns/i.test(message)) {
-    return "域名无法解析，请检查 DNS 或 CNAME 记录";
+    return "域名无法解析，请检查 DNS 或 Endpoint";
   }
   if (/timed?\s*out|ETIMEDOUT|ERR_CONNECTION_TIMED_OUT/i.test(message)) {
     return "连接超时，请检查网络、防火墙或 Endpoint";

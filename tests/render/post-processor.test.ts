@@ -114,12 +114,14 @@ test("Reading View does not attach an old batch error to a reused node", async (
 
 test("Reading View replaces a PDF placeholder with the shared browser link", async () => {
   const pdf = image("oss://vault/a.pdf") as ReturnType<typeof image> & { replacement?: unknown };
+  pdf.setAttribute("alt", "百鸟数据-声纹检测报告.pdf");
   pdf.replaceWith = (replacement: unknown) => { pdf.replacement = replacement; };
   const root = {
     closest: () => null,
     querySelectorAll: (selector: string) => selector === "img" ? [pdf] : [],
   } as unknown as HTMLElement;
   const host = { className: "oss-pdf-viewer" };
+  let displayName: string | undefined;
 
   await createOssPostProcessor({
     bucketName: "bucket",
@@ -128,8 +130,12 @@ test("Reading View replaces a PDF placeholder with the shared browser link", asy
   } as PluginSettings, {
     resolve: async () => "https://signed.example/vault/a.pdf",
   } as unknown as SignedUrlResolver, {
-    mount: () => host as unknown as HTMLElement,
+    mount: (_from, _url, _key, name) => {
+      displayName = name;
+      return host as unknown as HTMLElement;
+    },
   })(root, {} as never);
 
   assert.equal(pdf.replacement, host);
+  assert.equal(displayName, "百鸟数据-声纹检测报告.pdf");
 });

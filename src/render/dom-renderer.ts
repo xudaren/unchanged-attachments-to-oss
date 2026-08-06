@@ -1,6 +1,7 @@
 import { clearOssRenderError, showOssRenderError } from "./error-state";
 import { ossKeyFromImageSource } from "./oss-source";
 import { defaultPdfRenderer, PdfRenderer } from "./pdf-link";
+import type { AttachmentContextMenuBinder, AttachmentKind } from "./context-menu";
 
 const MEDIA_TAGS = new Set(["IMG", "VIDEO", "AUDIO", "A", "EMBED"]);
 export const RENDER_SURFACE_SELECTOR = ".markdown-source-view, .canvas-node";
@@ -64,13 +65,14 @@ export async function hydrateOssSubtree(
   root: ParentNode,
   resolver: UrlResolver,
   pdfRenderer: PdfRenderer = defaultPdfRenderer,
+  contextMenu?: AttachmentContextMenuBinder,
 ): Promise<void> {
   const elements: Element[] = [];
   if (isHydrationCandidate(root)) elements.push(root as unknown as Element);
   if (typeof root.querySelectorAll === "function") {
     elements.push(...Array.from(root.querySelectorAll(OSS_MEDIA_SELECTOR)));
   }
-  await Promise.allSettled(elements.map((element) => hydrateElement(element, resolver, pdfRenderer)));
+  await Promise.allSettled(elements.map((element) => hydrateElement(element, resolver, pdfRenderer, contextMenu)));
 }
 
 function isInRenderSurface(node: Node): boolean {
@@ -84,6 +86,7 @@ async function hydrateElement(
   element: Element,
   resolver: UrlResolver,
   pdfRenderer: PdfRenderer,
+  contextMenu?: AttachmentContextMenuBinder,
 ): Promise<void> {
   const html = element as HTMLElement;
   const attribute = element.tagName === "A" ? "href" : "src";
@@ -107,13 +110,16 @@ async function hydrateElement(
     const desired = mediaKind(key);
     const current = tagKind(element.tagName);
     if (desired === "embed" || (desired && desired !== current && (current === "img" || current === "a"))) {
-      element.replaceWith(buildMediaElement(element, desired, url, key, pdfRenderer));
+      const replacement = buildMediaElement(element, desired, url, key, pdfRenderer);
+      contextMenu?.bind(replacement, contextKind(desired), url, key);
+      replaceRenderedElement(element, replacement, desired === "embed");
     } else if (element.tagName === "A") {
       const anchor = element as HTMLAnchorElement;
       anchor.href = url;
       anchor.target = "_blank";
     } else {
       (element as HTMLImageElement).src = url;
+      if (desired) contextMenu?.bind(html, contextKind(desired), url, key);
     }
   } catch (error) {
     const currentSource = element.getAttribute(attribute);
@@ -131,14 +137,35 @@ async function hydrateElement(
   }
 }
 
+function contextKind(kind: Exclude<MediaKind, "a">): AttachmentKind {
+  return kind === "embed" ? "pdf" : kind;
+}
+
+/**
+ * Live Preview nests native embeds in an inline host. Expand that host while
+ * preserving it because CodeMirror also uses it as the Markdown editing entry.
+ */
+function replaceRenderedElement(from: Element, replacement: HTMLElement, promotePdfHost: boolean): void {
+  if (promotePdfHost) expandLivePreviewPdfHost(from);
+  from.replaceWith(replacement);
+}
+
+function expandLivePreviewPdfHost(from: Element): void {
+  if (!from.closest(".markdown-source-view")) return;
+  const host = from.closest(".cm-embed-block, .internal-embed, .image-embed");
+  const line = from.closest(".cm-line");
+  host?.classList?.add("oss-pdf-live-preview-host");
+  line?.classList?.add("oss-pdf-live-preview-line");
+}
+
 type MediaKind = "img" | "video" | "audio" | "embed" | "a";
 
 function mediaKind(key: string): Exclude<MediaKind, "a"> | null {
   const dot = key.lastIndexOf(".");
   const ext = dot >= 0 ? key.slice(dot + 1).toLowerCase() : "";
-  if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(ext)) return "img";
-  if (["mp4", "mov", "webm", "mkv"].includes(ext)) return "video";
-  if (["mp3", "wav", "m4a", "ogg", "flac"].includes(ext)) return "audio";
+  if (["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp"].includes(ext)) return "img";
+  if (["mp4", "mov", "webm", "mkv", "ogv", "m4v"].includes(ext)) return "video";
+  if (["mp3", "wav", "m4a", "ogg", "flac", "aac", "opus"].includes(ext)) return "audio";
   if (ext === "pdf") return "embed";
   return null;
 }
@@ -177,7 +204,7 @@ function buildMediaElement(
     audio.controls = true;
     return audio;
   }
-  return pdfRenderer.mount(from, url, key);
+  return pdfRenderer.mount(from, url, key, from.getAttribute("alt") ?? from.textContent ?? undefined);
 }
 
 function isHydrationCandidate(node: ParentNode): boolean {

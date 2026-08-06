@@ -10,7 +10,6 @@ interface CredentialDraft {
   accessKeyId: string;
   accessKeySecret: string;
   endpoint: string;
-  cname: string;
 }
 
 export class OssSettingTab extends PluginSettingTab {
@@ -31,7 +30,6 @@ export class OssSettingTab extends PluginSettingTab {
       accessKeyId: plugin.settings.accessKeyId,
       accessKeySecret: plugin.settings.accessKeySecret,
       endpoint: plugin.settings.endpoint,
-      cname: plugin.settings.cname,
     };
 
     containerEl.createEl("h2", { text: "阿里云 OSS 配置" });
@@ -107,16 +105,6 @@ export class OssSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("CNAME（可选）")
-      .setDesc("填了会替代 bucket.endpoint，签名规则不变")
-      .addText((t) =>
-        t
-          .setPlaceholder("cdn.example.com")
-          .setValue(this.draft.cname)
-          .onChange((v) => { this.draft.cname = v.trim(); }),
-      );
-
-    new Setting(containerEl)
       .setName("保存并校验")
       .setDesc("向 OSS 发送轻量请求验证凭证有效性，通过后保存")
       .addButton((b) =>
@@ -174,7 +162,7 @@ export class OssSettingTab extends PluginSettingTab {
     const pendingCount = Object.keys(plugin.settings.pendingUploads).length;
     if (pendingCount > 0) {
       containerEl.createEl("p", {
-        text: `当前有 ${pendingCount} 个未完成上传，将在下次同名附件出现时续传或超时清理。`,
+        text: `当前有 ${pendingCount} 个未完成上传，可从状态栏重试；超过 24 小时将清理。`,
         cls: "setting-item-description",
       });
     }
@@ -186,7 +174,7 @@ export class OssSettingTab extends PluginSettingTab {
    */
   private async saveCredentialsWithVerification(): Promise<void> {
     const { plugin } = this;
-    const { region, bucketName, accessKeyId, accessKeySecret, endpoint, cname } = this.draft;
+    const { region, bucketName, accessKeyId, accessKeySecret, endpoint } = this.draft;
 
     if (!bucketName || !accessKeyId || !accessKeySecret) {
       new Notice("请填写 Bucket / AccessKey ID / AccessKey Secret");
@@ -194,7 +182,7 @@ export class OssSettingTab extends PluginSettingTab {
     }
 
     // 用草稿值构建临时 client 校验
-    const tempSettings = { ...plugin.settings, region, bucketName, accessKeyId, accessKeySecret, endpoint, cname };
+    const tempSettings = { ...plugin.settings, region, bucketName, accessKeyId, accessKeySecret, endpoint };
     const tempClient = new OssClient(tempSettings);
 
     const notice = new Notice("正在校验凭证…", 0);
@@ -206,7 +194,6 @@ export class OssSettingTab extends PluginSettingTab {
       plugin.settings.accessKeyId = accessKeyId;
       plugin.settings.accessKeySecret = accessKeySecret;
       plugin.settings.endpoint = endpoint;
-      plugin.settings.cname = cname;
       // 刷新主 client 实例以使用新凭证
       plugin.client = new OssClient(plugin.settings);
       plugin.urlResolver.clear();

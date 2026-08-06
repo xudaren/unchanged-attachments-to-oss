@@ -31,25 +31,19 @@ export class OssClient {
     private readonly sendRequest: typeof requestUrl = requestUrl,
   ) {}
 
-  /** 不经过 CNAME 的标准 Bucket Host，用于隔离凭证与自定义域名问题。 */
+  /** 所有 OSS 请求与签名访问统一使用标准 Bucket Host。 */
   private get standardHost(): string {
     const endpoint = this.settings.endpoint || `${this.settings.region}.aliyuncs.com`;
     return `${this.settings.bucketName}.${endpoint}`;
   }
 
-  /** 请求 host：优先 CNAME，其次 bucket.endpoint */
-  private get host(): string {
-    if (this.settings.cname) return this.settings.cname;
+  /** GetObject 的签名 host。 */
+  get signedUrlHost(): string {
     return this.standardHost;
   }
 
-  /** GetObject 的签名 host（可能是 CNAME） */
-  get signedUrlHost(): string {
-    return this.host;
-  }
-
   /** 拼装完整 URL。query 顺序不影响签名，但影响可读性 */
-  private buildUrl(key: string, query?: Record<string, string>, host = this.host): string {
+  private buildUrl(key: string, query?: Record<string, string>, host = this.standardHost): string {
     const qs = query
       ? "?" +
         Object.entries(query)
@@ -59,7 +53,8 @@ export class OssClient {
     return `https://${host}/${encodeKey(key)}${qs}`;
   }
 
-  private async doRequest(opts: OssRequestOptions, host = this.host): Promise<RequestUrlResponse> {
+  /** OSS API 始终走标准 Bucket Host。 */
+  private async doRequest(opts: OssRequestOptions, host = this.standardHost): Promise<RequestUrlResponse> {
     const date = new Date().toUTCString();
     const ossHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(opts.extraHeaders ?? {})) {
@@ -170,30 +165,22 @@ export class OssClient {
     return parseUploadsXml(resp.text);
   }
 
-  /**
-   * 轻量凭证校验：ListObjectsV2 max-keys=0，验证 Bucket 可达 + AK/SK 有效。
-   * 正常返回 true；签名/网络/权限异常则抛出 OssError。
-   */
+  /** 对随机不存在 Key 发送签名 GET；NoSuchKey 证明 Bucket、签名和 GetObject 权限有效。 */
   async verifyCredentials(): Promise<boolean> {
+    const prefix = this.settings.objectKeyPrefix.replace(/^\/+|\/+$/g, "");
+    const probeKey = `${prefix ? `${prefix}/` : ""}.oss-plugin-probe/${crypto.randomUUID()}`;
     const request: OssRequestOptions = {
       method: "GET",
-      key: "",
-      query: { "list-type": "2", "max-keys": "1" },
+      key: probeKey,
     };
 
     try {
       await this.doRequest(request, this.standardHost);
     } catch (error) {
+      if (error instanceof OssError && error.status === 404 && error.code === "NoSuchKey") return true;
       throw new CredentialVerificationError("oss", this.standardHost, error);
     }
 
-    if (this.settings.cname) {
-      try {
-        await this.doRequest(request, this.settings.cname);
-      } catch (error) {
-        throw new CredentialVerificationError("cname", this.settings.cname, error);
-      }
-    }
     return true;
   }
 }

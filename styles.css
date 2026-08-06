@@ -18,35 +18,131 @@
 .oss-pdf-attachment {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   width: 100%;
-  min-height: 42px;
-  padding: 6px 10px;
+  min-height: 64px;
+  padding: 11px 12px;
   border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-m);
-  background: var(--background-secondary);
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--background-secondary), var(--background-primary-alt));
   color: var(--text-normal);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  box-sizing: border-box;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+/* Live Preview wraps embeds in shrink-to-content hosts. Expand the host as well
+   as the card so its 100% width means the full editor line. */
+.markdown-source-view .cm-embed-block:has(.oss-pdf-attachment),
+.markdown-source-view .internal-embed:has(.oss-pdf-attachment),
+.markdown-source-view .image-embed:has(.oss-pdf-attachment) {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.markdown-source-view .cm-line:has(.oss-pdf-attachment) {
+  width: 100%;
+}
+
+/* Added by the renderer without replacing CodeMirror's editable host nodes. */
+.markdown-source-view .oss-pdf-live-preview-host,
+.markdown-source-view .oss-pdf-live-preview-line {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.markdown-source-view .oss-pdf-attachment,
+.markdown-reading-view .oss-pdf-attachment,
+.canvas-node .oss-pdf-attachment {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.oss-pdf-attachment:hover {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.09);
+  transform: translateY(-1px);
+}
+
+.oss-pdf-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 42px;
+  height: 42px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-red) 16%, transparent);
+  color: var(--color-red);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+}
+
+.oss-pdf-details {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  gap: 3px;
 }
 
 .oss-pdf-name {
-  flex: 1 1 auto;
-  min-width: 0;
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text-normal);
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.oss-pdf-meta {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.25;
 }
 
 .oss-pdf-open {
   flex: 0 0 auto;
-  padding: 4px 10px;
-  border-radius: var(--radius-s);
-  background: var(--interactive-normal);
-  color: var(--text-normal);
+  padding: 7px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary);
+  color: var(--text-accent);
+  font-size: var(--font-ui-small);
+  font-weight: 600;
   text-decoration: none;
 }
 
 .oss-pdf-open:hover,
 .oss-pdf-open:focus-visible {
-  background: var(--interactive-hover);
-  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  text-decoration: none;
+}
+
+@media (max-width: 480px) {
+  .oss-pdf-attachment {
+    gap: 10px;
+    min-height: 58px;
+    padding: 9px 10px;
+  }
+
+  .oss-pdf-badge {
+    flex-basis: 36px;
+    height: 36px;
+    border-radius: 8px;
+  }
+
+  .oss-pdf-open {
+    padding: 6px 9px;
+  }
 }
