@@ -1,9 +1,10 @@
 import { MarkdownPostProcessorContext } from "obsidian";
-import { PluginSettings, mimeOf } from "../types";
+import { PluginSettings } from "../types";
 import { RENDER_SURFACE_SELECTOR } from "./dom-renderer";
 import { clearOssRenderError, showOssRenderError } from "./error-state";
 import { ossKeyFromImageSource } from "./oss-source";
 import { SignedUrlResolver } from "./url-resolver";
+import { defaultPdfRenderer, PdfRenderer } from "./pdf-link";
 
 /**
  * Reading View 后处理：遍历 <img>/<video>/<audio>/<a>，
@@ -12,6 +13,7 @@ import { SignedUrlResolver } from "./url-resolver";
 export function createOssPostProcessor(
   settings: PluginSettings,
   resolver: SignedUrlResolver,
+  pdfRenderer: PdfRenderer = defaultPdfRenderer,
 ) {
   return async function processor(el: HTMLElement, _ctx: MarkdownPostProcessorContext) {
     // Live Preview 与 Canvas 由增量 Observer 独占，避免同一节点被两条管线重复处理。
@@ -21,7 +23,7 @@ export function createOssPostProcessor(
     // 我们统一按 src / href 属性扫一遍
     const nodes = collectOssNodes(el);
     const results = await Promise.allSettled(
-      nodes.map((node) => hydrateNode(node, settings, resolver)),
+      nodes.map((node) => hydrateNode(node, settings, resolver, pdfRenderer)),
     );
     results.forEach((result, index) => {
       if (result.status !== "rejected") return;
@@ -72,6 +74,7 @@ async function hydrateNode(
   node: OssNode,
   settings: PluginSettings,
   resolver: SignedUrlResolver,
+  pdfRenderer: PdfRenderer,
 ): Promise<void> {
   if (node.key.startsWith("uploading/")) return;
   if (!settings.bucketName || !settings.accessKeyId || !settings.accessKeySecret) {
@@ -90,8 +93,8 @@ async function hydrateNode(
 
     // 若原元素类型与实际媒体不匹配（如 mp4 被渲染成 <img>），替换为合适元素
     const desired = mediaKindOfExt(ext);
-    if (desired && desired !== node.kind && (node.kind === "img" || node.kind === "a")) {
-      const replaced = buildMediaElement(desired, url, mimeOf(ext), node.el);
+    if (desired === "embed" || (desired && desired !== node.kind && (node.kind === "img" || node.kind === "a"))) {
+      const replaced = buildMediaElement(desired, url, node.el, node.key, pdfRenderer);
       node.el.replaceWith(replaced);
     } else if (node.kind === "img") {
       (node.el as HTMLImageElement).src = url;
@@ -131,7 +134,13 @@ function mediaKindOfExt(ext: string): MediaKind | null {
   return null;
 }
 
-function buildMediaElement(kind: MediaKind, url: string, mime: string, from: Element): HTMLElement {
+function buildMediaElement(
+  kind: MediaKind,
+  url: string,
+  from: Element,
+  key: string,
+  pdfRenderer: PdfRenderer,
+): HTMLElement {
   if (kind === "img") {
     const img = document.createElement("img");
     img.src = url;
@@ -152,10 +161,5 @@ function buildMediaElement(kind: MediaKind, url: string, mime: string, from: Ele
     return a;
   }
   // pdf
-  const e = document.createElement("embed");
-  e.setAttribute("src", url);
-  e.setAttribute("type", mime);
-  e.style.width = "100%";
-  e.style.height = "600px";
-  return e;
+  return pdfRenderer.mount(from, url, key);
 }

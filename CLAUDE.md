@@ -74,7 +74,7 @@ Reading View 只用 `registerMarkdownPostProcessor` 处理当前渲染片段；L
 
 所有渲染入口统一调用 `SignedUrlResolver`：缓存键由 `bucket + signedHost + objectKey` 组成，LRU 缓存保留至过期前 60s；同一缓存键正在签名时复用同一个 Promise；凭证、Endpoint、CNAME 或有效期变化时先清空已完成和进行中的缓存，旧代请求无论成功或失败都必须转用当前配置重新解析，禁止向活动节点返回旧签名 URL。HMAC 使用按 AccessKey Secret 复用的 Web Crypto `CryptoKey`，避免每个附件重复 `importKey`。
 
-Obsidian/Electron 规范化出的 `oss:///%E8...` 必须先恢复为原始 Object Key，再生成签名 URL。图片、视频、音频和 PDF 分别渲染为对应原生元素。异步签名完成后必须再次核对节点当前 Object Key，禁止旧结果覆盖被 Obsidian 复用的节点。批量渲染必须逐节点隔离失败，单个附件签名异常不能中断其他附件；失败时保留原始 `oss://` 并显示独立错误标记，允许后续视图刷新重试。
+Obsidian/Electron 规范化出的 `oss:///%E8...` 必须先恢复为原始 Object Key，再生成签名 URL。图片、视频、音频分别渲染为对应原生元素；PDF 只渲染为轻量附件行，显示文件名和“浏览器打开”按钮，禁止下载 PDF 二进制、创建 Canvas、启动 Worker 或内嵌系统 PDF 查看器。每个 PDF 必须独立签名和渲染，连续多个 PDF 中单个失败不得影响其他 PDF。异步签名完成后必须再次核对节点当前 Object Key，禁止旧结果覆盖被 Obsidian 复用的节点。批量渲染必须逐节点隔离失败，失败时保留原始 `oss://` 并显示独立错误标记，允许后续视图刷新重试。
 
 ### 删除
 
@@ -100,6 +100,7 @@ Obsidian/Electron 规范化出的 `oss:///%E8...` 必须先恢复为原始 Objec
 - 同一批附件必须并发解析且逐项隔离异常，禁止用会因单项失败而整体 reject 的裸 `Promise.all`。
 - 未配置 Bucket/AK/SK 时必须在签名前失败并保留 `oss://`，禁止生成无效 HTTPS URL 覆盖可重试源地址。
 - 设置切换必须在第一个异步持久化等待前清空签名状态，且 `onLayoutReady` 回调必须检查插件是否已经卸载，禁止旧配置和卸载后的监听回写 DOM。
+- PDF 展示必须只生成签名链接按钮，禁止引入 PDF.js、Worker、Canvas 或 PDF 二进制下载，因为最高性能优先且多个 PDF 必须互不争用渲染资源。
 
 ## 规则
 
@@ -114,4 +115,5 @@ Obsidian/Electron 规范化出的 `oss:///%E8...` 必须先恢复为原始 Objec
 - 推荐提供"迁移指定文件夹附件"和"迁移全部附件"两条命令，因为支持先小范围验证再全量迁移。
 - 推荐凭证校验用 `requestUrl HEAD /{bucket}.{endpoint}/` 或 `GET /?list-type=2&max-keys=1`，因为开销最小且能同时验证 Bucket 可达与签名有效。
 - 推荐 `autoUpload` 开关变更时在状态栏展示当前状态图标，因为可让用户随时确认上传是否启用。
+- 推荐 PDF 附件行使用文件名和“浏览器打开”按钮，因为用户可按需查看且不会消耗内嵌渲染资源。
 - 推荐语言简洁凝练，因为节省token

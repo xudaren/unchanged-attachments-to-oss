@@ -9,7 +9,12 @@
     "typecheck": "tsc -noEmit -skipLibCheck",
     "test": "node tests/build-tests.mjs && node --test .test-dist/**/*.test.js"
   },
-  "keywords": ["obsidian", "plugin", "oss", "aliyun"],
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "oss",
+    "aliyun"
+  ],
   "author": "xukai",
   "license": "MIT",
   "devDependencies": {

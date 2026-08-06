@@ -144,6 +144,41 @@ test("replaces an Obsidian image placeholder with the actual media type", async 
   assert.equal(image.replacement?.src, "https://signed.example/vault/a.mp4");
 });
 
+test("replaces a PDF placeholder with the shared browser link", async () => {
+  const image = mediaElement("IMG", "oss://vault/a.pdf") as ReturnType<typeof mediaElement> & {
+    replacement?: unknown;
+  };
+  const pdfHost = { className: "oss-pdf-viewer" };
+  const mounts: string[] = [];
+
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/vault/a.pdf",
+  }, {
+    mount: (_from, url) => {
+      mounts.push(url);
+      return pdfHost as unknown as HTMLElement;
+    },
+  });
+
+  assert.deepEqual(mounts, ["https://signed.example/vault/a.pdf"]);
+  assert.equal(image.replacement, pdfHost);
+});
+
+test("replaces an existing PDF embed with the shared browser link", async () => {
+  const embed = mediaElement("EMBED", "oss://vault/legacy.pdf") as ReturnType<typeof mediaElement> & {
+    replacement?: unknown;
+  };
+  const host = { className: "oss-pdf-viewer" };
+
+  await hydrateOssSubtree(embed as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/vault/legacy.pdf",
+  }, {
+    mount: () => host as unknown as HTMLElement,
+  });
+
+  assert.equal(embed.replacement, host);
+});
+
 test("does not let an older signature overwrite a reused media node", async () => {
   const image = mediaElement("IMG", "oss://vault/first.jpg");
   const completions = new Map<string, (url: string) => void>();

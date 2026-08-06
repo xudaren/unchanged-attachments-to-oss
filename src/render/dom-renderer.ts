@@ -1,6 +1,6 @@
-import { mimeOf } from "../types";
 import { clearOssRenderError, showOssRenderError } from "./error-state";
 import { ossKeyFromImageSource } from "./oss-source";
+import { defaultPdfRenderer, PdfRenderer } from "./pdf-link";
 
 const MEDIA_TAGS = new Set(["IMG", "VIDEO", "AUDIO", "A", "EMBED"]);
 export const RENDER_SURFACE_SELECTOR = ".markdown-source-view, .canvas-node";
@@ -60,13 +60,17 @@ export function findRenderSurfaces(root: ParentNode): ParentNode[] {
 }
 
 /** Hydrate only one changed/added subtree, including the root element itself. */
-export async function hydrateOssSubtree(root: ParentNode, resolver: UrlResolver): Promise<void> {
+export async function hydrateOssSubtree(
+  root: ParentNode,
+  resolver: UrlResolver,
+  pdfRenderer: PdfRenderer = defaultPdfRenderer,
+): Promise<void> {
   const elements: Element[] = [];
   if (isHydrationCandidate(root)) elements.push(root as unknown as Element);
   if (typeof root.querySelectorAll === "function") {
     elements.push(...Array.from(root.querySelectorAll(OSS_MEDIA_SELECTOR)));
   }
-  await Promise.allSettled(elements.map((element) => hydrateElement(element, resolver)));
+  await Promise.allSettled(elements.map((element) => hydrateElement(element, resolver, pdfRenderer)));
 }
 
 function isInRenderSurface(node: Node): boolean {
@@ -76,7 +80,11 @@ function isInRenderSurface(node: Node): boolean {
   return Boolean(element?.matches?.(RENDER_SURFACE_SELECTOR) || element?.closest?.(RENDER_SURFACE_SELECTOR));
 }
 
-async function hydrateElement(element: Element, resolver: UrlResolver): Promise<void> {
+async function hydrateElement(
+  element: Element,
+  resolver: UrlResolver,
+  pdfRenderer: PdfRenderer,
+): Promise<void> {
   const html = element as HTMLElement;
   const attribute = element.tagName === "A" ? "href" : "src";
   const source = element.getAttribute(attribute);
@@ -98,8 +106,8 @@ async function hydrateElement(element: Element, resolver: UrlResolver): Promise<
     clearOssRenderError(element);
     const desired = mediaKind(key);
     const current = tagKind(element.tagName);
-    if (desired && desired !== current && (current === "img" || current === "a")) {
-      element.replaceWith(buildMediaElement(element, desired, url, key));
+    if (desired === "embed" || (desired && desired !== current && (current === "img" || current === "a"))) {
+      element.replaceWith(buildMediaElement(element, desired, url, key, pdfRenderer));
     } else if (element.tagName === "A") {
       const anchor = element as HTMLAnchorElement;
       anchor.href = url;
@@ -147,6 +155,7 @@ function buildMediaElement(
   kind: Exclude<MediaKind, "a">,
   url: string,
   key: string,
+  pdfRenderer: PdfRenderer,
 ): HTMLElement {
   const doc = from.ownerDocument;
   if (kind === "img") {
@@ -168,12 +177,7 @@ function buildMediaElement(
     audio.controls = true;
     return audio;
   }
-  const embed = doc.createElement("embed");
-  embed.src = url;
-  embed.type = mimeOf(key.slice(key.lastIndexOf(".") + 1));
-  embed.style.width = "100%";
-  embed.style.height = "600px";
-  return embed;
+  return pdfRenderer.mount(from, url, key);
 }
 
 function isHydrationCandidate(node: ParentNode): boolean {

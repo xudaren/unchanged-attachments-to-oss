@@ -15,6 +15,7 @@ await esbuild.build({
     "tests/render/architecture.test.ts",
     "tests/render/dom-renderer.test.ts",
     "tests/render/post-processor.test.ts",
+    "tests/render/pdf-link.test.ts",
   ],
   bundle: true,
   format: "cjs",
