@@ -14,6 +14,7 @@ import { UploadManager } from "./upload/manager";
 import { migrateAttachments } from "./upload/migrate";
 import { UploadProgressBar } from "./upload/progress";
 import { OssAttachmentContextMenu } from "./render/context-menu";
+import { disconnectMediaLoading } from "./render/media-loading";
 
 export default class OssPlugin extends Plugin {
   settings!: PluginSettings;
@@ -124,6 +125,7 @@ export default class OssPlugin extends Plugin {
     this.register(() => {
       renderDisposed = true;
       renderObserver?.disconnect();
+      disconnectMediaLoading();
       clearHmacKeyCache();
     });
 

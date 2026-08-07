@@ -6,6 +6,8 @@ import { ossKeyFromImageSource } from "./oss-source";
 import { SignedUrlResolver } from "./url-resolver";
 import { defaultPdfRenderer, PdfRenderer } from "./pdf-link";
 import type { AttachmentContextMenuBinder, AttachmentKind } from "./context-menu";
+import { loadImageNearViewport, loadMediaOnInteraction, loadVideoNearViewport } from "./media-loading";
+import { mediaDisplayName, mountMediaLabel } from "./media-label";
 
 /**
  * Reading View 后处理：遍历 <img>/<video>/<audio>/<a>，
@@ -97,14 +99,18 @@ async function hydrateNode(
 
     // 若原元素类型与实际媒体不匹配（如 mp4 被渲染成 <img>），替换为合适元素
     const desired = mediaKindOfExt(ext);
+    const displayName = mediaDisplayName(node.el);
     if (desired === "embed" || (desired && desired !== node.kind && (node.kind === "img" || node.kind === "a"))) {
       const replaced = buildMediaElement(desired, url, node.el, node.key, pdfRenderer);
       contextMenu?.bind(replaced, contextKind(desired), url, node.key, sourcePath);
       node.el.replaceWith(replaced);
+      if (desired !== "embed") mountMediaLabel(replaced, displayName, node.key);
     } else if (node.kind === "img") {
-      (node.el as HTMLImageElement).src = url;
-    } else if (node.kind === "video" || node.kind === "audio") {
-      (node.el as HTMLMediaElement).src = url;
+      loadImageNearViewport(node.el as HTMLImageElement, url, node.key);
+    } else if (node.kind === "video") {
+      loadVideoNearViewport(node.el as HTMLVideoElement, url);
+    } else if (node.kind === "audio") {
+      loadMediaOnInteraction(node.el as HTMLMediaElement, url);
     } else if (node.kind === "a") {
       (node.el as HTMLAnchorElement).href = url;
       (node.el as HTMLAnchorElement).target = "_blank";
@@ -113,6 +119,7 @@ async function hydrateNode(
     }
     if (desired && !(desired === "embed" || (desired !== node.kind && (node.kind === "img" || node.kind === "a")))) {
       contextMenu?.bind(node.el as HTMLElement, contextKind(desired), url, node.key, sourcePath);
+      mountMediaLabel(node.el as HTMLElement, displayName, node.key);
     }
   } catch (error) {
     if (html.dataset.ossSigningKey !== node.key || currentOssKey(node) !== node.key) return;
@@ -155,21 +162,22 @@ function buildMediaElement(
 ): HTMLElement {
   if (kind === "img") {
     const img = document.createElement("img");
-    img.src = url;
     img.alt = from.getAttribute("alt") ?? "";
+    img.setAttribute("src", `oss://${key}`);
+    loadImageNearViewport(img, url, key);
     return img;
   }
   if (kind === "video") {
     const v = document.createElement("video");
-    v.src = url;
     v.controls = true;
     v.style.maxWidth = "100%";
+    loadVideoNearViewport(v, url);
     return v;
   }
   if (kind === "audio") {
     const a = document.createElement("audio");
-    a.src = url;
     a.controls = true;
+    loadMediaOnInteraction(a, url);
     return a;
   }
   // pdf

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "deploy:test": "npm run build && node scripts/deploy-test.mjs",
     "typecheck": "tsc -noEmit -skipLibCheck",
     "test": "node tests/build-tests.mjs && node --test .test-dist/**/*.test.js"
   },

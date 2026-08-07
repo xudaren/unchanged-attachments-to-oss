@@ -82,12 +82,17 @@ test("selects a newly added Canvas surface without hydrating its outer UI contai
 function mediaElement(tagName: string, source: string) {
   const attributes = new Map<string, string>([[tagName === "A" ? "href" : "src", source]]);
   let errorMarker: { className?: string; textContent?: string | null; remove(): void } | null = null;
+  const listeners = new Map<string, Set<(event: { key?: string }) => void>>();
   const element = {
     nodeType: 1,
     tagName,
     dataset: {} as Record<string, string>,
     style: {} as Record<string, string>,
-    closest: () => ({} as Element),
+    closest: (selector: string) => (
+      selector.includes("markdown-source-view") || selector.includes("canvas-node")
+        ? ({} as Element)
+        : null
+    ),
     ownerDocument: {
       createElement: () => ({
         dataset: {} as Record<string, string>,
@@ -102,6 +107,18 @@ function mediaElement(tagName: string, source: string) {
     getAttribute: (name: string) => attributes.get(name) ?? null,
     setAttribute: (name: string, value: string) => attributes.set(name, value),
     removeAttribute: (name: string) => attributes.delete(name),
+    addEventListener: (name: string, listener: (event: { key?: string }) => void) => {
+      const set = listeners.get(name) ?? new Set();
+      set.add(listener);
+      listeners.set(name, set);
+    },
+    removeEventListener: (name: string, listener: (event: { key?: string }) => void) => {
+      listeners.get(name)?.delete(listener);
+    },
+    dispatch: (name: string, event: { key?: string } = {}) => {
+      for (const listener of Array.from(listeners.get(name) ?? [])) listener(event);
+    },
+    play: async () => undefined,
     replaceWith(replacement: unknown) { (this as { replacement?: unknown }).replacement = replacement; },
     get src() { return attributes.get("src") ?? ""; },
     set src(value: string) { attributes.set("src", value); },
@@ -130,7 +147,7 @@ test("hydrates only the supplied OSS image subtree", async () => {
 test("replaces an Obsidian image placeholder with the actual media type", async () => {
   const image = mediaElement("IMG", "oss://vault/a.mp4") as ReturnType<typeof mediaElement> & {
     ownerDocument?: { createElement(tag: string): unknown };
-    replacement?: { tagName: string; src: string };
+    replacement?: { tagName: string; src: string; preload: string; dispatch(name: string): void };
   };
   image.ownerDocument = {
     createElement: (tag: string) => mediaElement(tag.toUpperCase(), ""),
@@ -141,7 +158,77 @@ test("replaces an Obsidian image placeholder with the actual media type", async 
   });
 
   assert.equal(image.replacement?.tagName, "VIDEO");
-  assert.equal(image.replacement?.src, "https://signed.example/vault/a.mp4");
+  assert.equal(image.replacement?.preload, "metadata");
+  assert.equal(image.replacement?.src, "https://signed.example/vault/a.mp4#t=0.001");
+});
+
+test("replaces an Obsidian image placeholder with an interactive audio player", async () => {
+  const image = mediaElement("IMG", "oss://vault/a.mp3") as ReturnType<typeof mediaElement> & {
+    ownerDocument?: { createElement(tag: string): unknown };
+    replacement?: { tagName: string; src: string; preload: string; dispatch(name: string): void };
+  };
+  image.ownerDocument = {
+    createElement: (tag: string) => mediaElement(tag.toUpperCase(), ""),
+  };
+  image.setAttribute("alt", "访谈录音.mp3");
+  const embedClasses: string[] = [];
+  const wrapperClasses: string[] = [];
+  const blockClasses: string[] = [];
+  const lineClasses: string[] = [];
+  const embed = { classList: { add: (name: string) => embedClasses.push(name) } } as Element;
+  const wrapper = { classList: { add: (name: string) => wrapperClasses.push(name) } } as Element;
+  const block = { classList: { add: (name: string) => blockClasses.push(name) } } as Element;
+  const line = { classList: { add: (name: string) => lineClasses.push(name) } } as Element;
+  image.closest = (selector: string) => {
+    if (selector === ".markdown-source-view") return {} as Element;
+    if (selector.includes(".internal-embed")) return embed;
+    if (selector === ".image-wrapper") return wrapper;
+    if (selector === ".cm-embed-block") return block;
+    if (selector === ".cm-line") return line;
+    return null;
+  };
+
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/vault/a.mp3",
+  });
+
+  assert.equal(image.replacement?.tagName, "AUDIO");
+  assert.equal(image.replacement?.preload, "none");
+  assert.equal(image.replacement?.src, "https://signed.example/vault/a.mp3");
+  assert.equal((image.replacement as unknown as { errorText: string })?.errorText, "访谈录音.mp3");
+  assert.deepEqual(embedClasses, ["oss-audio-live-preview-host"]);
+  assert.deepEqual(wrapperClasses, ["oss-audio-live-preview-wrapper"]);
+  assert.deepEqual(blockClasses, ["oss-audio-live-preview-block"]);
+  assert.deepEqual(lineClasses, ["oss-audio-live-preview-line"]);
+});
+
+test("mounts audio inside the editable Live Preview embed host", async () => {
+  const host = mediaElement("SPAN", "oss://vault/live.mp3") as ReturnType<typeof mediaElement> & {
+    matches(selector: string): boolean;
+    replaceChildren(child: unknown): void;
+    appendChild(child: unknown): void;
+    mounted?: ReturnType<typeof mediaElement>;
+    label?: { textContent?: string };
+    classList: { add(name: string): void };
+    ownerDocument: { createElement(tag: string): ReturnType<typeof mediaElement> };
+  };
+  const classes: string[] = [];
+  host.matches = (selector) => selector === '.internal-embed[src^="oss://"]';
+  host.replaceChildren = (child) => { host.mounted = child as ReturnType<typeof mediaElement>; };
+  host.appendChild = (child) => { host.label = child as { textContent?: string }; };
+  host.classList = { add: (name) => classes.push(name) };
+  host.ownerDocument = { createElement: (tag) => mediaElement(tag.toUpperCase(), "") };
+  host.setAttribute("alt", "现场录音.mp3");
+
+  await hydrateOssSubtree(host as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/vault/live.mp3",
+  });
+
+  assert.equal(host.tagName, "SPAN");
+  assert.equal(host.mounted?.tagName, "AUDIO");
+  assert.equal(host.mounted?.src, "https://signed.example/vault/live.mp3");
+  assert.equal(host.label?.textContent, "现场录音.mp3");
+  assert.deepEqual(classes, ["oss-audio-live-preview-host", "oss-media-caption-host"]);
 });
 
 test("replaces a PDF placeholder with the shared browser link", async () => {
@@ -174,11 +261,14 @@ test("expands a Live Preview PDF host without replacing its editable CodeMirror 
     closest(selector: string): Element | null;
   };
   const hostClasses: string[] = [];
+  const wrapperClasses: string[] = [];
   const lineClasses: string[] = [];
   const embedHost = { classList: { add: (name: string) => hostClasses.push(name) } };
+  const wrapper = { classList: { add: (name: string) => wrapperClasses.push(name) } };
   const line = { classList: { add: (name: string) => lineClasses.push(name) } };
   image.closest = (selector: string) => {
     if (selector === ".markdown-source-view") return {} as Element;
+    if (selector === ".image-wrapper") return wrapper as unknown as Element;
     if (selector.includes(".cm-embed-block")) return embedHost as unknown as Element;
     if (selector === ".cm-line") return line as unknown as Element;
     return null;
@@ -192,6 +282,7 @@ test("expands a Live Preview PDF host without replacing its editable CodeMirror 
   });
 
   assert.deepEqual(hostClasses, ["oss-pdf-live-preview-host"]);
+  assert.deepEqual(wrapperClasses, ["oss-pdf-live-preview-wrapper"]);
   assert.deepEqual(lineClasses, ["oss-pdf-live-preview-line"]);
   assert.equal(image.replacement, pdfCard);
 });

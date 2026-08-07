@@ -1,4 +1,4 @@
-import { Menu, Notice, Plugin, MarkdownView, TFile } from "obsidian";
+import { Menu, Modal, Notice, Plugin, MarkdownView, TFile } from "obsidian";
 import { OSS_URL_REGEX } from "../types";
 
 export type AttachmentKind = "img" | "video" | "audio" | "pdf";
@@ -31,6 +31,7 @@ const TYPE_LABEL: Record<AttachmentKind, string> = {
 /** OSS 附件专用右键菜单，避免非图片附件继承 Obsidian 的图片菜单。 */
 export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
   private readonly data = new WeakMap<HTMLElement, ContextData>();
+  private readonly previewData = new WeakMap<HTMLElement, ContextData>();
 
   constructor(
     private readonly plugin: Plugin,
@@ -39,6 +40,7 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
 
   bind(element: HTMLElement, kind: AttachmentKind, url: string, key: string, sourcePath?: string): void {
     this.data.set(element, { kind, url, key, sourcePath });
+    if (kind === "img") this.bindImagePreview(element);
     if (element.dataset.ossContextMenuBound === "true") return;
     element.dataset.ossContextMenuBound = "true";
     element.addEventListener("contextmenu", (event) => {
@@ -49,6 +51,29 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
       event.stopImmediatePropagation();
       this.open(event, current);
     });
+  }
+
+  private bindImagePreview(image: HTMLElement): void {
+    const host = image.closest<HTMLElement>(".image-embed, .internal-embed") ?? image.parentElement;
+    if (!host) return;
+    const current = this.data.get(image);
+    if (current) this.previewData.set(host, current);
+    host.classList.add("oss-image-preview-host");
+    if (host.querySelector(":scope > .oss-image-zoom-button")) return;
+
+    const button = image.ownerDocument.createElement("button");
+    button.type = "button";
+    button.className = "oss-image-zoom-button clickable-icon";
+    button.setAttribute("aria-label", "放大 OSS 图片");
+    button.title = "放大图片";
+    button.textContent = "⛶";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const data = this.previewData.get(host);
+      if (data) new OssImagePreviewModal(this.plugin, data.url, data.key).open();
+    });
+    host.appendChild(button);
   }
 
   private open(event: MouseEvent, data: ContextData): void {
@@ -107,6 +132,21 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
       });
       return removed;
     });
+  }
+}
+
+class OssImagePreviewModal extends Modal {
+  constructor(plugin: Plugin, private readonly url: string, private readonly key: string) {
+    super(plugin.app);
+  }
+
+  onOpen(): void {
+    this.modalEl.addClass("mod-oss-image-preview");
+    this.contentEl.empty();
+    const image = this.contentEl.createEl("img", {
+      attr: { src: this.url, alt: this.key },
+    });
+    image.addClass("oss-image-preview-content");
   }
 }
 

@@ -54,10 +54,11 @@ export class AttachmentInterceptor {
     const supported = files.filter((f) => isSupportedExt(extOf(f.name, f.type)));
     if (supported.length === 0) return;
     if (supported.length !== files.length || hasClipboardText(evt)) return;
+    // Start every read before the clipboard event returns; OS-backed File handles
+    // can be revoked while multipart upload is awaiting the network.
+    const captures = supported.map(captureAttachment);
     evt.preventDefault();
-    for (const file of supported) {
-      await this.uploadAndInsert(file, editor, view);
-    }
+    await this.uploadCaptured(captures, editor, view);
   }
 
   private async handleDrop(evt: DragEvent, editor: Editor, view: MarkdownView) {
@@ -66,14 +67,29 @@ export class AttachmentInterceptor {
     const supported = files.filter((f) => isSupportedExt(extOf(f.name, f.type)));
     if (supported.length === 0) return;
     if (supported.length !== files.length) return;
+    const captures = supported.map(captureAttachment);
     evt.preventDefault();
-    for (const file of supported) {
-      await this.uploadAndInsert(file, editor, view);
+    await this.uploadCaptured(captures, editor, view);
+  }
+
+  private async uploadCaptured(
+    captures: Array<Promise<CapturedAttachment>>,
+    editor: Editor,
+    view: MarkdownView,
+  ): Promise<void> {
+    const results = await Promise.allSettled(captures);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        console.error("[oss] 无法快照输入附件", result.reason);
+        new Notice(formatInputReadError(result.reason));
+        continue;
+      }
+      await this.uploadAndInsert(result.value, editor, view);
     }
   }
 
   /** 拦截路径：blob → OSS → 插入占位 → 成功替换 / 失败回写本地 */
-  private async uploadAndInsert(file: File, editor: Editor, view: MarkdownView): Promise<void> {
+  private async uploadAndInsert(file: CapturedAttachment, editor: Editor, view: MarkdownView): Promise<void> {
     const ext = extOf(file.name, file.type);
     const sourcePath = view.file?.path ?? "";
     const occurrenceId = crypto.randomUUID();
@@ -85,7 +101,7 @@ export class AttachmentInterceptor {
 
     try {
       const { objectKey, tempId } = await this.manager.upload({
-        blob: file,
+        blob: file.blob,
         ext,
         sourcePath,
         occurrenceId,
@@ -109,7 +125,7 @@ export class AttachmentInterceptor {
       notice.hide();
       // 失败兜底：移除占位，写入本地，登记待重试
       replaceInEditor(editor, placeholder, "");
-      const localPath = await writeLocalAttachment(this.plugin.app.vault, view.file, file);
+      const localPath = await writeLocalAttachment(this.plugin.app.vault, view.file, file.name, file.blob);
       if (localPath) {
         const pendingTempId = err instanceof UploadPausedError ? err.tempId : taskTempId;
         if (pendingTempId) await this.manager.bindLocalPath(pendingTempId, localPath);
@@ -322,13 +338,14 @@ function replaceInEditor(editor: Editor, from: string, to: string): boolean {
 async function writeLocalAttachment(
   vault: Vault,
   mdFile: TFile | null,
-  file: File,
+  fileName: string,
+  blob: Blob,
 ): Promise<string | null> {
   try {
-    const buf = await file.arrayBuffer();
+    const buf = await blob.arrayBuffer();
     // 简化：写到 md 同目录，用原文件名（冲突则加时间戳）
     const dir = mdFile?.parent?.path ?? "";
-    let name = file.name || `pasted-${Date.now()}.bin`;
+    let name = fileName || `pasted-${Date.now()}.bin`;
     let target = dir ? `${dir}/${name}` : name;
     if (await vault.adapter.exists(target)) {
       const dot = name.lastIndexOf(".");
@@ -343,4 +360,32 @@ async function writeLocalAttachment(
     console.error("[oss] 本地回写失败", err);
     return null;
   }
+}
+
+export interface CapturedAttachment {
+  name: string;
+  type: string;
+  size: number;
+  blob: Blob;
+}
+
+export async function captureAttachment(file: File): Promise<CapturedAttachment> {
+  const bytes = await file.arrayBuffer();
+  const blob = new Blob([bytes], { type: file.type });
+  return { name: file.name, type: file.type, size: blob.size, blob };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function formatInputReadError(error: unknown): string {
+  const message = errorMessage(error);
+  if (
+    (error instanceof DOMException && error.name === "NotReadableError") ||
+    /requested file could not be read|permission problems.*reference to a file/i.test(message)
+  ) {
+    return "无法读取附件：文件可能仅存在云盘（如 iCloud、OneDrive 等），请先下载到本地后重试";
+  }
+  return `无法读取输入附件：${message}`;
 }

@@ -2,8 +2,10 @@ import { clearOssRenderError, showOssRenderError } from "./error-state";
 import { ossKeyFromImageSource } from "./oss-source";
 import { defaultPdfRenderer, PdfRenderer } from "./pdf-link";
 import type { AttachmentContextMenuBinder, AttachmentKind } from "./context-menu";
+import { loadImageNearViewport, loadMediaOnInteraction, loadVideoNearViewport } from "./media-loading";
+import { mediaDisplayName, mountMediaLabel } from "./media-label";
 
-const MEDIA_TAGS = new Set(["IMG", "VIDEO", "AUDIO", "A", "EMBED"]);
+const MEDIA_TAGS = new Set(["IMG", "VIDEO", "AUDIO", "A", "EMBED", "SPAN"]);
 export const RENDER_SURFACE_SELECTOR = ".markdown-source-view, .canvas-node";
 const OSS_MEDIA_SELECTOR = [
   'img[src^="oss://"]',
@@ -11,6 +13,7 @@ const OSS_MEDIA_SELECTOR = [
   'audio[src^="oss://"]',
   'a[href^="oss://"]',
   'embed[src^="oss://"]',
+  '.internal-embed[src^="oss://"]',
 ].join(",");
 
 export interface UrlResolver {
@@ -109,17 +112,35 @@ async function hydrateElement(
     clearOssRenderError(element);
     const desired = mediaKind(key);
     const current = tagKind(element.tagName);
-    if (desired === "embed" || (desired && desired !== current && (current === "img" || current === "a"))) {
+    const displayName = mediaDisplayName(element);
+    if (desired && isLivePreviewEmbedHost(element)) {
       const replacement = buildMediaElement(element, desired, url, key, pdfRenderer);
       contextMenu?.bind(replacement, contextKind(desired), url, key);
+      expandLivePreviewMediaHost(element, desired);
+      element.replaceChildren(replacement);
+      html.classList.add(`oss-${contextKind(desired)}-live-preview-host`);
+      if (desired !== "embed") mountMediaLabel(replacement, displayName, key, element);
+    } else if (desired === "embed" || (desired && desired !== current && (current === "img" || current === "a"))) {
+      const replacement = buildMediaElement(element, desired, url, key, pdfRenderer);
+      contextMenu?.bind(replacement, contextKind(desired), url, key);
+      expandLivePreviewMediaHost(element, desired);
       replaceRenderedElement(element, replacement, desired === "embed");
+      if (desired !== "embed") mountMediaLabel(replacement, displayName, key);
     } else if (element.tagName === "A") {
       const anchor = element as HTMLAnchorElement;
       anchor.href = url;
       anchor.target = "_blank";
     } else {
-      (element as HTMLImageElement).src = url;
+      if (desired === "img") {
+        loadImageNearViewport(element as HTMLImageElement, url, key);
+      } else if (desired === "video") {
+        loadVideoNearViewport(element as HTMLVideoElement, url);
+      } else if (desired === "audio") {
+        expandLivePreviewMediaHost(element, desired);
+        loadMediaOnInteraction(element as HTMLMediaElement, url);
+      }
       if (desired) contextMenu?.bind(html, contextKind(desired), url, key);
+      if (desired) mountMediaLabel(html, displayName, key);
     }
   } catch (error) {
     const currentSource = element.getAttribute(attribute);
@@ -137,6 +158,21 @@ async function hydrateElement(
   }
 }
 
+function isLivePreviewEmbedHost(element: Element): boolean {
+  return element.matches?.('.internal-embed[src^="oss://"]') === true;
+}
+
+function expandLivePreviewMediaHost(from: Element, kind: Exclude<MediaKind, "a">): void {
+  if (kind !== "audio" || !from.closest(".markdown-source-view")) return;
+  const embed = from.matches?.(".internal-embed, .image-embed")
+    ? from
+    : from.closest(".internal-embed, .image-embed");
+  embed?.classList.add("oss-audio-live-preview-host");
+  from.closest(".image-wrapper")?.classList.add("oss-audio-live-preview-wrapper");
+  from.closest(".cm-embed-block")?.classList.add("oss-audio-live-preview-block");
+  from.closest(".cm-line")?.classList.add("oss-audio-live-preview-line");
+}
+
 function contextKind(kind: Exclude<MediaKind, "a">): AttachmentKind {
   return kind === "embed" ? "pdf" : kind;
 }
@@ -152,6 +188,7 @@ function replaceRenderedElement(from: Element, replacement: HTMLElement, promote
 
 function expandLivePreviewPdfHost(from: Element): void {
   if (!from.closest(".markdown-source-view")) return;
+  from.closest(".image-wrapper")?.classList?.add("oss-pdf-live-preview-wrapper");
   const host = from.closest(".cm-embed-block, .internal-embed, .image-embed");
   const line = from.closest(".cm-line");
   host?.classList?.add("oss-pdf-live-preview-host");
@@ -187,21 +224,22 @@ function buildMediaElement(
   const doc = from.ownerDocument;
   if (kind === "img") {
     const image = doc.createElement("img");
-    image.src = url;
     image.alt = from.getAttribute("alt") ?? "";
+    image.setAttribute("src", `oss://${key}`);
+    loadImageNearViewport(image, url, key);
     return image;
   }
   if (kind === "video") {
     const video = doc.createElement("video");
-    video.src = url;
     video.controls = true;
     video.style.maxWidth = "100%";
+    loadVideoNearViewport(video, url);
     return video;
   }
   if (kind === "audio") {
     const audio = doc.createElement("audio");
-    audio.src = url;
     audio.controls = true;
+    loadMediaOnInteraction(audio, url);
     return audio;
   }
   return pdfRenderer.mount(from, url, key, from.getAttribute("alt") ?? from.textContent ?? undefined);
@@ -209,7 +247,7 @@ function buildMediaElement(
 
 function isHydrationCandidate(node: ParentNode): boolean {
   const candidate = node as unknown as Element;
-  if (candidate.nodeType !== 1 || !MEDIA_TAGS.has(candidate.tagName)) return false;
+  if (candidate.nodeType !== 1 || (!MEDIA_TAGS.has(candidate.tagName) && !isLivePreviewEmbedHost(candidate))) return false;
   const attribute = candidate.tagName === "A" ? "href" : "src";
   return candidate.getAttribute(attribute)?.startsWith("oss://") === true ||
     candidate.getAttribute("data-oss-render-error") === "true";

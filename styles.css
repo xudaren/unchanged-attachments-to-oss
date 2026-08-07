@@ -1,8 +1,12 @@
-/* Hide Obsidian's temporary custom-protocol image before hydration. */
+/* Keep a non-zero placeholder so near-viewport lazy loading can observe it. */
 .markdown-source-view img[src^="oss://"],
 .markdown-reading-view img[src^="oss://"],
 .canvas-node img[src^="oss://"] {
-  display: none;
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  border-radius: 6px;
+  background: var(--background-secondary);
 }
 
 .oss-render-error {
@@ -13,6 +17,110 @@
   color: var(--text-error);
   background: var(--background-modifier-error-hover);
   font-size: var(--font-ui-small);
+}
+
+.oss-media-label {
+  display: block;
+  overflow: hidden;
+  max-width: 100%;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.4;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oss-media-caption-host {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  overflow: visible;
+  vertical-align: top;
+}
+
+.oss-media-caption-host > img,
+.oss-media-caption-host > video,
+.oss-media-caption-host > audio {
+  display: block;
+  max-width: 100%;
+}
+
+.oss-media-caption-host:has(> audio),
+.oss-audio-live-preview-host,
+.oss-pdf-attachment {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.oss-audio-live-preview-host,
+.oss-video-live-preview-host {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  flex-direction: column;
+  overflow: visible;
+}
+
+.oss-audio-live-preview-host > audio {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.oss-media-caption-host:has(> audio) {
+  align-items: flex-start;
+}
+
+.oss-media-caption-host:has(> audio) > audio,
+.oss-media-caption-host:has(> audio) > .oss-media-label,
+.oss-audio-live-preview-host > .oss-media-label {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.oss-image-preview-host {
+  position: relative;
+}
+
+.oss-image-zoom-button {
+  position: absolute;
+  top: 8px;
+  right: 80px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--background-primary) 88%, transparent);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+
+.modal.mod-oss-image-preview {
+  width: min(92vw, 1200px);
+  max-width: 92vw;
+}
+
+.modal.mod-oss-image-preview .modal-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+
+.oss-image-preview-content {
+  max-width: 100%;
+  max-height: 82vh;
+  object-fit: contain;
 }
 
 .oss-pdf-attachment {
@@ -44,6 +152,50 @@
 
 .markdown-source-view .cm-line:has(.oss-pdf-attachment) {
   width: 100%;
+}
+
+/* Audio has the same shrink-to-content Live Preview wrappers as PDF. */
+.markdown-source-view .cm-embed-block:has(.oss-audio-live-preview-host),
+.markdown-source-view .internal-embed:has(.oss-audio-live-preview-host),
+.markdown-source-view .image-embed:has(.oss-audio-live-preview-host),
+.markdown-source-view .cm-line:has(.oss-audio-live-preview-host) {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Explicit renderer classes cover Obsidian versions where the OSS source is
+   an img placeholder nested inside the embed and :has() cannot identify it. */
+.markdown-source-view .oss-audio-live-preview-block,
+.markdown-source-view .oss-audio-live-preview-wrapper,
+.markdown-source-view .oss-audio-live-preview-host,
+.markdown-source-view .oss-audio-live-preview-line {
+  display: block !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  box-sizing: border-box;
+  overflow: visible;
+}
+
+.markdown-source-view .oss-pdf-live-preview-wrapper {
+  display: flex !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  box-sizing: border-box;
+}
+
+.markdown-source-view .oss-pdf-live-preview-wrapper > .oss-pdf-attachment {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+.markdown-source-view .oss-audio-live-preview-host > audio,
+.markdown-source-view .oss-audio-live-preview-wrapper > audio,
+.markdown-source-view .oss-audio-live-preview-host .oss-media-caption-host > audio {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
 }
 
 /* Added by the renderer without replacing CodeMirror's editable host nodes. */
