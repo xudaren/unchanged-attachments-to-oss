@@ -86,6 +86,30 @@ test("multipart listing uses the standard bucket host", async () => {
   ]);
 });
 
+test("object listing follows ListObjectsV2 continuation tokens", async () => {
+  const urls: string[] = [];
+  setRequestUrlHandler(async (request) => {
+    const url = String(request.url);
+    urls.push(url);
+    const second = url.includes("continuation-token=");
+    return {
+      status: 200,
+      text: second
+        ? "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>vault/b&amp;c.pdf</Key><LastModified>2026-08-01T00:00:00.000Z</LastModified><Size>20</Size></Contents></ListBucketResult>"
+        : "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next/token</NextContinuationToken><Contents><Key>vault/a.pdf</Key><LastModified>2026-08-01T00:00:00.000Z</LastModified><Size>10</Size></Contents></ListBucketResult>",
+      headers: {}, arrayBuffer: new ArrayBuffer(0), json: {},
+    };
+  });
+
+  const objects = await new OssClient(settings()).listObjects("vault/");
+
+  assert.deepEqual(objects.map((object) => object.key), ["vault/a.pdf", "vault/b&c.pdf"]);
+  assert.equal(urls.length, 2);
+  assert.match(urls[0], /list-type=2/);
+  assert.match(urls[0], /prefix=vault%2F/);
+  assert.match(urls[1], /continuation-token=next%2Ftoken/);
+});
+
 test("signed object URLs use the same standard bucket host", () => {
   assert.equal(
     new OssClient(settings()).signedUrlHost,

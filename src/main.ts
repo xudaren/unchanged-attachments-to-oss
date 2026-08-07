@@ -15,6 +15,7 @@ import { migrateAttachments } from "./upload/migrate";
 import { UploadProgressBar } from "./upload/progress";
 import { OssAttachmentContextMenu } from "./render/context-menu";
 import { disconnectMediaLoading } from "./render/media-loading";
+import { runObjectAudit } from "./audit/modal";
 
 export default class OssPlugin extends Plugin {
   settings!: PluginSettings;
@@ -141,6 +142,25 @@ export default class OssPlugin extends Plugin {
       id: "cleanup-orphan-uploads",
       name: "清理孤儿分片上传",
       callback: () => void this.uploadManager.cleanupOrphans(),
+    });
+
+    this.addCommand({
+      id: "audit-oss-object-references",
+      name: "核验 OSS 对象引用",
+      callback: () => {
+        if (!this.isConfigured()) {
+          new Notice("OSS 未配置：请填写 Bucket / AK / SK");
+          return;
+        }
+        const prefix = this.settings.objectKeyPrefix.replace(/^\/+|\/+$/g, "");
+        void runObjectAudit({
+          app: this.app,
+          vault: this.app.vault,
+          client: this.client,
+          prefix: prefix ? `${prefix}/` : "",
+          pendingUploads: this.settings.pendingUploads,
+        });
+      },
     });
 
     this.addCommand({

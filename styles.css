@@ -19,6 +19,92 @@
   font-size: var(--font-ui-small);
 }
 
+.modal.oss-audit-modal-shell {
+  width: min(760px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+}
+
+.oss-audit-modal {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.oss-audit-list {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  max-height: 280px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 0 12px;
+  box-sizing: border-box;
+}
+
+.oss-audit-list .setting-item,
+.oss-audit-list .setting-item-info {
+  min-width: 0;
+}
+
+.oss-audit-list .setting-item-info {
+  flex: 1 1 auto;
+}
+
+.oss-audit-list .setting-item-control {
+  flex: 0 0 auto;
+}
+
+.oss-audit-list .setting-item-name,
+.oss-audit-list .setting-item-description,
+.oss-audit-missing code {
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.oss-audit-missing {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  max-height: 180px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-left: 24px;
+  padding-right: 8px;
+  box-sizing: border-box;
+}
+
+.oss-audit-missing li,
+.oss-audit-missing span {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.oss-audit-actions {
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+}
+
+.oss-audit-actions .setting-item-control {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+@media (max-width: 480px) {
+  .modal.oss-audit-modal-shell {
+    width: calc(100vw - 16px);
+    max-width: calc(100vw - 16px);
+  }
+
+  .oss-audit-list .setting-item {
+    align-items: flex-start;
+  }
+}
+
 .oss-media-label {
   display: block;
   overflow: hidden;

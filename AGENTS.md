@@ -102,6 +102,12 @@ OSS 附件的右键菜单由插件统一接管，禁止让 Obsidian 将视频、
 
 删除单条引用时确认项默认选中；删除整篇 Markdown 时远端对象默认不选中，必须由用户主动逐项选择，因为一次文档删除可能影响多个对象。确认弹窗只代表当前文档，不暗示其他文档没有引用。
 
+### OSS 对象核验
+
+用户主动执行“核验 OSS 对象引用”命令时，插件完整分页调用 ListObjectsV2 获取 `objectKeyPrefix` 下的对象集合，并扫描 Vault 内 Markdown 与 Canvas 的 `oss://` 引用集合。`OSS - Vault引用 - pendingUploads` 为疑似垃圾，`Vault引用 - OSS` 为引用失效；禁止只比较数量。
+
+ListObjects 权限只属于可选核验能力，设置保存时的凭证探针仍禁止调用 ListObjects。核验默认只展示报告；疑似垃圾默认不选中，最近 24 小时对象禁止删除，用户选择删除后必须重新扫描 Vault 引用并跳过已恢复引用的对象。插件内部保留路径不得作为附件垃圾展示。
+
 ## 约束
 
 - 必须只用 `requestUrl` 收发 HTTP，禁止使用 `fetch/XHR/ali-oss` SDK，因为要兼容移动端且绕 CORS。
@@ -126,6 +132,8 @@ OSS 附件的右键菜单由插件统一接管，禁止让 Obsidian 将视频、
 - 必须只在用户取消或确认不可恢复的上传失败时调 `AbortMultipartUpload`；可恢复错误必须保留续传状态，并由 24h 超时清理兜底，兼顾断点续传与孤儿分片成本。
 - `autoUpload` 为 false 时必须完全跳过拦截与补传，禁止排队或静默上传，因为用户明确暂停意味着不产生任何网络请求。
 - 设置页保存必须先通过凭证校验再持久化，禁止存入无效凭证，因为后续上传会静默失败且用户难以定位原因。
+- OSS 对象核验必须完整处理 ListObjectsV2 分页，并以 Object Key 集合差为准；禁止用对象数量相等推断无垃圾，也禁止让核验所需的 ListObjects 权限成为上传和渲染的必需权限。
+- 核验结果中的疑似垃圾默认不选中，最近 24 小时对象必须处于删除保护期；真正删除前必须重新扫描 Vault 引用，禁止删除扫描后恢复引用的对象。
 - MutationObserver 回调必须只处理本批次变更节点和新增子树，禁止调用 `document.querySelectorAll` 或等价的全页扫描，因为 Obsidian 编辑、滚动和拖动 Canvas 会高频修改 DOM。
 - Reading View、Live Preview、Canvas 必须有单一渲染责任方，禁止同一视图由两套渲染器竞争写入 URL；Reading View 归 Post Processor，Live Preview/Canvas 归增量 Observer。
 - OSS 附件右键菜单必须阻止 Obsidian 图片菜单继续冒泡，并且只能对当前 Object Key 和可确认的来源 Markdown 执行操作；禁止因 DOM 外层仍为 `.image-embed` 就展示图片专属操作。

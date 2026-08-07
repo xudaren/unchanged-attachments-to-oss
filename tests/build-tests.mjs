@@ -23,6 +23,7 @@ await esbuild.build({
     "tests/upload/manager.test.ts",
     "tests/upload/types.test.ts",
     "tests/delete/watcher.test.ts",
+    "tests/audit/reconcile.test.ts",
   ],
   bundle: true,
   format: "cjs",

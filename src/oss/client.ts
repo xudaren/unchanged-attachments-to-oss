@@ -24,6 +24,12 @@ export interface ListedMultipartUpload {
   initiated: string;
 }
 
+export interface ListedObject {
+  key: string;
+  lastModified: string;
+  size: number;
+}
+
 /** OSS REST 客户端，全部走 requestUrl，跨平台且绕 CORS。 */
 export class OssClient {
   constructor(
@@ -165,6 +171,28 @@ export class OssClient {
     return parseUploadsXml(resp.text);
   }
 
+  /** 完整分页列出指定前缀下的对象；只由用户主动发起的核验使用。 */
+  async listObjects(prefix: string): Promise<ListedObject[]> {
+    const objects: ListedObject[] = [];
+    let continuationToken: string | null = null;
+    do {
+      const query: Record<string, string> = {
+        "list-type": "2",
+        prefix,
+        "max-keys": "1000",
+      };
+      if (continuationToken) query["continuation-token"] = continuationToken;
+      const resp = await this.doRequest({ method: "GET", key: "", query });
+      const page = parseObjectsXml(resp.text);
+      objects.push(...page.objects);
+      continuationToken = page.isTruncated ? page.nextContinuationToken : null;
+      if (page.isTruncated && !continuationToken) {
+        throw new Error("ListObjectsV2 返回截断结果但缺少 NextContinuationToken");
+      }
+    } while (continuationToken);
+    return objects;
+  }
+
   /** 对随机不存在 Key 发送签名 GET；NoSuchKey 证明 Bucket、签名和 GetObject 权限有效。 */
   async verifyCredentials(): Promise<boolean> {
     const prefix = this.settings.objectKeyPrefix.replace(/^\/+|\/+$/g, "");
@@ -203,4 +231,40 @@ function parseUploadsXml(xml: string): ListedMultipartUpload[] {
     if (key && uploadId && initiated) results.push({ key, uploadId, initiated });
   }
   return results;
+}
+
+function parseObjectsXml(xml: string): {
+  objects: ListedObject[];
+  isTruncated: boolean;
+  nextContinuationToken: string | null;
+} {
+  const objects: ListedObject[] = [];
+  const re = /<Contents>([\s\S]*?)<\/Contents>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const key = extractXmlTag(m[1], "Key");
+    const lastModified = extractXmlTag(m[1], "LastModified");
+    const size = Number(extractXmlTag(m[1], "Size"));
+    if (key && lastModified && Number.isFinite(size)) {
+      objects.push({ key: decodeXml(key), lastModified, size });
+    }
+  }
+  return {
+    objects,
+    isTruncated: extractXmlTag(xml, "IsTruncated") === "true",
+    nextContinuationToken: decodeXmlNullable(extractXmlTag(xml, "NextContinuationToken")),
+  };
+}
+
+function decodeXmlNullable(value: string | null): string | null {
+  return value === null ? null : decodeXml(value);
+}
+
+function decodeXml(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
 }
