@@ -1,10 +1,9 @@
-import { Modal, Notice, Plugin, Setting, TFile, TFolder } from "obsidian";
-import { isSupportedExt } from "../types";
+import { Modal, Notice, Plugin, Setting, TFile } from "obsidian";
 import { UploadManager } from "./manager";
 import {
   AttachmentOccurrence,
-  findResolvedAttachmentOccurrences,
   replaceOneResolvedAttachmentReference,
+  scanMigrationOccurrences,
 } from "./links";
 
 /** 迁移附件到 OSS：每个 Markdown 引用实例独立上传。 */
@@ -14,24 +13,21 @@ export async function migrateAttachments(
   folderPath?: string,
 ): Promise<void> {
   const vault = plugin.app.vault;
-  let allFiles: TFile[];
-
-  if (folderPath) {
-    const folder = vault.getAbstractFileByPath(folderPath);
-    if (!(folder instanceof TFolder)) {
-      new Notice(`文件夹不存在：${folderPath}`);
-      return;
-    }
-    allFiles = [];
-    collectFilesRecursive(folder, allFiles);
-  } else {
-    allFiles = vault.getFiles();
-  }
-
-  const attachments: Array<{ file: TFile; occurrences: AttachmentOccurrence[] }> = [];
-  for (const file of allFiles.filter((item) => isSupportedExt(item.extension))) {
-    const occurrences = await findResolvedAttachmentOccurrences(vault, plugin.app.metadataCache, file);
-    if (occurrences.length > 0) attachments.push({ file, occurrences });
+  const scope = folderPath || "全部";
+  const scanNotice = new Notice(`[${scope}] 准备扫描…`, 0);
+  let attachments: Array<{ file: TFile; occurrences: AttachmentOccurrence[] }>;
+  try {
+    attachments = await scanMigrationOccurrences(vault, plugin.app.metadataCache, folderPath, (progress) => {
+      scanNotice.setMessage(
+        `[${scope}] 扫描中 ${progress.scanned}/${progress.total}，已发现 ${progress.attachmentCount} 个附件、${progress.occurrenceCount} 个引用`,
+      );
+    });
+  } catch (error) {
+    console.error("[oss-migrate] 扫描失败", error);
+    new Notice(`扫描失败：${(error as Error).message}`);
+    return;
+  } finally {
+    scanNotice.hide();
   }
 
   if (attachments.length === 0) {
@@ -42,7 +38,6 @@ export async function migrateAttachments(
   const occurrenceCount = attachments.reduce((sum, item) => sum + item.occurrences.length, 0);
   if (!await confirmMigration(plugin, attachments.length, occurrenceCount, folderPath ?? "全部")) return;
 
-  const scope = folderPath ?? "全部";
   const notice = new Notice(`[${scope}] 开始迁移 ${occurrenceCount} 个独立引用…`, 0);
   let done = 0;
   let failed = 0;
@@ -93,13 +88,6 @@ export async function migrateAttachments(
 
   notice.setMessage(`迁移完成：成功 ${done}，失败 ${failed}`);
   setTimeout(() => notice.hide(), 5000);
-}
-
-function collectFilesRecursive(folder: TFolder, out: TFile[]): void {
-  for (const child of folder.children) {
-    if (child instanceof TFile) out.push(child);
-    else if (child instanceof TFolder) collectFilesRecursive(child, out);
-  }
 }
 
 function confirmMigration(

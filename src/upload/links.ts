@@ -1,4 +1,5 @@
 import { MetadataCache, TFile, Vault } from "obsidian";
+import { isSupportedExt } from "../types";
 
 interface EmbedToken {
   start: number;
@@ -16,6 +17,71 @@ export interface AttachmentOccurrence {
   /** 文档初次计划时的引用序号，仅用于持久化区分任务。 */
   occurrenceIndex: number;
   occurrenceId: string;
+}
+
+export interface MigrationScanProgress {
+  scanned: number;
+  total: number;
+  attachmentCount: number;
+  occurrenceCount: number;
+}
+
+/**
+ * Scan Markdown once and group resolved local attachment occurrences.
+ * A folder scope includes notes in that folder and attachments physically stored there.
+ */
+export async function scanMigrationOccurrences(
+  vault: Vault,
+  metadataCache: MetadataCache,
+  folderPath?: string,
+  onProgress?: (progress: MigrationScanProgress) => void,
+): Promise<Array<{ file: TFile; occurrences: AttachmentOccurrence[] }>> {
+  const markdownFiles = vault.getMarkdownFiles();
+  const grouped = new Map<string, { file: TFile; occurrences: AttachmentOccurrence[] }>();
+  const scopedTargets = new Set<string>();
+  const inScope = (path: string): boolean => !folderPath
+    || path === folderPath
+    || path.startsWith(`${folderPath}/`);
+  let scopedOccurrenceCount = 0;
+
+  onProgress?.({ scanned: 0, total: markdownFiles.length, attachmentCount: 0, occurrenceCount: 0 });
+  for (let index = 0; index < markdownFiles.length; index++) {
+    const md = markdownFiles[index];
+    const content = await vault.cachedRead(md);
+    for (const token of parseEmbeds(content)) {
+      const linkpath = normalizeLinkpath(token.target);
+      if (!linkpath || /^\w+:\/\//.test(linkpath)) continue;
+      const target = metadataCache.getFirstLinkpathDest(linkpath, md.path);
+      if (!(target instanceof TFile) || !isSupportedExt(target.extension)) continue;
+      const item = grouped.get(target.path) ?? { file: target, occurrences: [] };
+      if ((!folderPath || inScope(md.path) || inScope(target.path)) && !scopedTargets.has(target.path)) {
+        scopedTargets.add(target.path);
+        scopedOccurrenceCount += item.occurrences.length;
+      }
+      const occurrenceIndex = item.occurrences.filter((entry) => entry.sourcePath === md.path).length;
+      item.occurrences.push({
+        sourcePath: md.path,
+        occurrenceIndex,
+        occurrenceId: `${md.path}#${occurrenceIndex}`,
+      });
+      grouped.set(target.path, item);
+      if (scopedTargets.has(target.path)) scopedOccurrenceCount++;
+    }
+    onProgress?.({
+      scanned: index + 1,
+      total: markdownFiles.length,
+      attachmentCount: scopedTargets.size,
+      occurrenceCount: scopedOccurrenceCount,
+    });
+    if ((index + 1) % 10 === 0) await yieldToUi();
+  }
+  return [...grouped.entries()]
+    .filter(([path]) => scopedTargets.has(path))
+    .map(([, item]) => item);
+}
+
+function yieldToUi(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /** Build one migration item for every resolved embed occurrence. */

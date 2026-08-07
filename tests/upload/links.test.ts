@@ -5,7 +5,37 @@ import {
   findResolvedAttachmentOccurrences,
   replaceOneResolvedAttachmentReference,
   replaceResolvedAttachmentReferences,
+  scanMigrationOccurrences,
 } from "../../src/upload/links";
+
+test("folder migration includes attachments referenced by notes in the selected folder", async () => {
+  const target = new TFile("shared-assets/image.png", "image.png");
+  const selectedNote = new TFile("projects/alpha/note.md", "note.md");
+  const otherNote = new TFile("projects/beta/note.md", "note.md");
+  const contents = new Map([
+    [selectedNote.path, "![[shared-assets/image.png]]"],
+    [otherNote.path, "![[shared-assets/image.png]]"],
+  ]);
+  const vault = {
+    getMarkdownFiles: () => [selectedNote, otherNote],
+    cachedRead: async (file: TFile) => contents.get(file.path) ?? "",
+  };
+  const progress: number[] = [];
+  const result = await scanMigrationOccurrences(
+    vault as never,
+    { getFirstLinkpathDest: () => target } as never,
+    "projects/alpha",
+    (item) => progress.push(item.scanned),
+  );
+
+  assert.equal(result.length, 1);
+  assert.deepEqual(
+    result[0].occurrences.map((item) => item.sourcePath),
+    [selectedNote.path, otherNote.path],
+    "all references must migrate before deleting the shared local attachment",
+  );
+  assert.deepEqual(progress, [0, 1, 2]);
+});
 
 test("plans and replaces duplicate embeds as independent occurrences", async () => {
   const target = new TFile("assets/image.png", "image.png");
