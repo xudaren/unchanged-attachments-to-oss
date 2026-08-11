@@ -320,10 +320,6 @@ export default class OssPlugin extends Plugin {
       this.settings.objectKeyPrefix = loadedPrefix;
       migrated = true;
     }
-    if ("cname" in legacy) {
-      delete legacy.cname;
-      migrated = true;
-    }
     if ("ossReferenceIndex" in legacy) {
       delete legacy.ossReferenceIndex;
       migrated = true;

@@ -16,9 +16,9 @@
 
 ## 使用范围限制
 
-当前版本只使用 OSS 默认公网 Endpoint，不支持 CNAME。根据[阿里云官方策略变更公告](https://www.alibabacloud.com/zh/notice/oss_update_notice_policy_change_in_calling_data_api_operations_via_the_default_public_domain_name_45a)，2025 年 3 月 20 日后新开通 OSS 服务的用户，通过默认公网域名访问中国内地 Bucket 的上传、下载、删除、HEAD、ListObjects 和 Multipart 等数据 API 会被阻断，并返回 `400 PublicEndpointForbidden`。
+当前版本只使用 OSS 标准公网 Endpoint。根据[阿里云官方策略变更公告](https://www.alibabacloud.com/zh/notice/oss_update_notice_policy_change_in_calling_data_api_operations_via_the_default_public_domain_name_45a)，2025 年 3 月 20 日后新开通 OSS 服务的用户，通过默认公网域名访问中国内地 Bucket 的上传、下载、删除、HEAD、ListObjects 和 Multipart 等数据 API 会被阻断，并返回 `400 PublicEndpointForbidden`。
 
-这类用户当前请在首次配置时选择非中国内地 Region。2025 年 3 月 20 日前已开通 OSS 服务的用户不受该策略影响。已有 `oss://` 引用的 Vault 不要直接切换 Region/Bucket；它们属于不可变存储身份，需等待专用迁移或 CNAME 支持。
+这类用户请在首次配置时选择非中国内地 Region。2025 年 3 月 20 日前已开通 OSS 服务的用户不受该策略影响。已有 `oss://` 引用的 Vault 不要直接切换 Region/Bucket；它们属于不可变存储身份，只能通过专用迁移流程变更。
 
 ## 安装
 

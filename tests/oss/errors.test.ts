@@ -50,17 +50,16 @@ test("formats invalid arguments with the rejected name and value", () => {
   assert.match(formatCredentialError(error, "bucket.example.com"), /请求参数错误.*max-keys=0/);
 });
 
-test("maps PublicEndpointForbidden to the current no-CNAME product boundary", () => {
+test("maps PublicEndpointForbidden to the standard endpoint product boundary", () => {
   const error = {
     status: 400,
     code: "PublicEndpointForbidden",
-    message: "Not allowed using the OSS public endpoint, please use CNAME instead",
+    message: "Data API access through the default public endpoint is forbidden",
     requestId: "REQ-PUBLIC-ENDPOINT",
   };
   const formatted = formatCredentialError(error, "bucket.oss-cn-hangzhou.aliyuncs.com");
 
   assert.match(formatted, /中国内地 Bucket 的默认公网 Endpoint/);
-  assert.match(formatted, /暂不支持 CNAME/);
   assert.match(formatted, /首次配置时改用非中国内地 Region/);
   assert.match(formatted, /REQ-PUBLIC-ENDPOINT/);
 });

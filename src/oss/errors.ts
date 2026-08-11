@@ -91,7 +91,7 @@ function formatOssReason(details: OssErrorDetails): string {
     case "NoSuchBucket":
       return "Bucket 不存在，或 Bucket 与 Region/Endpoint 不匹配";
     case "PublicEndpointForbidden":
-      return "阿里云已阻止当前账号通过中国内地 Bucket 的默认公网 Endpoint 调用数据 API；本插件暂不支持 CNAME，请在首次配置时改用非中国内地 Region（已有引用请勿直接切换存储身份）";
+      return "阿里云已阻止当前账号通过中国内地 Bucket 的默认公网 Endpoint 调用数据 API；请在首次配置时改用非中国内地 Region（已有引用请勿直接切换存储身份）";
     case "InvalidArgument": {
       const argument = details.argumentName
         ? `（${details.argumentName}${details.argumentValue ? `=${details.argumentValue}` : ""}）`
