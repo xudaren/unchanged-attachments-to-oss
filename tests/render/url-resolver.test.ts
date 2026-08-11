@@ -7,6 +7,7 @@ function context(host: string) {
   return {
     bucket: "bucket-a",
     host,
+    region: "cn-shanghai",
     accessKeyId: "ak",
     accessKeySecret: "sk",
     expireSeconds: 3600,
@@ -32,6 +33,24 @@ test("deduplicates concurrent signing for the same bucket, host and key", async 
 
   assert.equal(calls, 1);
   assert.equal(first, second);
+});
+
+test("leases expose expiry and generation and become stale after clear", async () => {
+  const expireAt = Date.now() + 3_600_000;
+  const resolver = new SignedUrlResolver(
+    () => context("bucket-a.oss-cn-shanghai.aliyuncs.com"),
+    new SignedUrlCache(),
+    async () => ({ url: "https://signed/a.jpg", expireAt }),
+  );
+
+  const first = await resolver.resolveLease("vault/a.jpg");
+  assert.deepEqual(first, { url: "https://signed/a.jpg", expireAt, generation: 0 });
+  assert.equal(resolver.isLeaseCurrent(first), true);
+
+  resolver.clear();
+  assert.equal(resolver.isLeaseCurrent(first), false);
+  const second = await resolver.resolveLease("vault/a.jpg");
+  assert.equal(second.generation, 1);
 });
 
 test("does not reuse a cached URL after the signed host changes", async () => {
@@ -82,6 +101,7 @@ test("rejects incomplete AK/SK configuration before invoking the signer", async 
     () => ({
       bucket: "",
       host: "",
+      region: "",
       accessKeyId: "",
       accessKeySecret: "",
       expireSeconds: 3600,
@@ -120,6 +140,27 @@ test("clear redirects an older failed signature to the current generation", asyn
 
   assert.equal(await oldRequest, "https://new.example.com/a.jpg");
   assert.equal(calls, 2);
+});
+
+test("dispose permanently rejects in-flight and future signing without restarting it", async () => {
+  let release!: (value: { url: string; expireAt: number }) => void;
+  let calls = 0;
+  const resolver = new SignedUrlResolver(
+    () => context("bucket-a.oss-cn-shanghai.aliyuncs.com"),
+    new SignedUrlCache(),
+    async () => {
+      calls += 1;
+      return new Promise((resolve) => { release = resolve; });
+    },
+  );
+
+  const inFlight = resolver.resolve("vault/a.jpg");
+  resolver.dispose();
+  release({ url: "https://stale.example/a.jpg", expireAt: Date.now() + 3_600_000 });
+
+  await assert.rejects(inFlight, { name: "SignedUrlResolverDisposedError" });
+  await assert.rejects(resolver.resolve("vault/a.jpg"), { name: "SignedUrlResolverDisposedError" });
+  assert.equal(calls, 1);
 });
 
 test("updating an existing LRU entry does not evict another cached URL", () => {

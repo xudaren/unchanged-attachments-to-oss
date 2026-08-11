@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hydrateOssSubtree, selectMutationRoots } from "../../src/render/dom-renderer";
+import type { AttachmentContextMenuBinder } from "../../src/render/context-menu";
+import { RenderSessionLifetime } from "../../src/render/lifetime";
+import {
+  disposeOssRenderSessions,
+  hydrateOssSubtree,
+  resetOssRenderLifetime,
+  resetOssRenderSessions,
+  selectMutationRoots,
+} from "../../src/render/dom-renderer";
 
 function node(
   nodeType: number,
@@ -205,19 +213,38 @@ test("replaces an Obsidian image placeholder with an interactive audio player", 
 test("mounts audio inside the editable Live Preview embed host", async () => {
   const host = mediaElement("SPAN", "oss://vault/live.mp3") as ReturnType<typeof mediaElement> & {
     matches(selector: string): boolean;
-    replaceChildren(child: unknown): void;
+    querySelector(selector: string): unknown;
     appendChild(child: unknown): void;
+    children: unknown[];
     mounted?: ReturnType<typeof mediaElement>;
     label?: { textContent?: string };
     classList: { add(name: string): void };
     ownerDocument: { createElement(tag: string): ReturnType<typeof mediaElement> };
   };
   const classes: string[] = [];
+  const nativeControl = { className: "internal-embed-button" };
+  host.children = [nativeControl];
   host.matches = (selector) => selector === '.internal-embed[src^="oss://"]';
-  host.replaceChildren = (child) => { host.mounted = child as ReturnType<typeof mediaElement>; };
-  host.appendChild = (child) => { host.label = child as { textContent?: string }; };
+  host.querySelector = () => null;
+  host.appendChild = (child) => {
+    host.children.push(child);
+    const slot = child as { replaceChildren?: (media: unknown) => void };
+    slot.replaceChildren = (media) => { host.mounted = media as ReturnType<typeof mediaElement>; };
+  };
   host.classList = { add: (name) => classes.push(name) };
-  host.ownerDocument = { createElement: (tag) => mediaElement(tag.toUpperCase(), "") };
+  host.ownerDocument = {
+    createElement: (tag) => {
+      const created = mediaElement(tag.toUpperCase(), "") as ReturnType<typeof mediaElement> & {
+        className: string;
+        replaceChildren(child: unknown): void;
+        remove(): void;
+      };
+      created.className = "";
+      created.replaceChildren = (child) => { host.mounted = child as ReturnType<typeof mediaElement>; };
+      created.remove = () => undefined;
+      return created;
+    },
+  };
   host.setAttribute("alt", "现场录音.mp3");
 
   await hydrateOssSubtree(host as unknown as ParentNode, {
@@ -227,15 +254,16 @@ test("mounts audio inside the editable Live Preview embed host", async () => {
   assert.equal(host.tagName, "SPAN");
   assert.equal(host.mounted?.tagName, "AUDIO");
   assert.equal(host.mounted?.src, "https://signed.example/vault/live.mp3");
-  assert.equal(host.label?.textContent, "现场录音.mp3");
-  assert.deepEqual(classes, ["oss-audio-live-preview-host", "oss-media-caption-host"]);
+  assert.equal(host.children[0], nativeControl);
+  assert.ok(classes.includes("oss-audio-live-preview-host"));
 });
 
 test("replaces a PDF placeholder with the shared browser link", async () => {
   const image = mediaElement("IMG", "oss://vault/a.pdf") as ReturnType<typeof mediaElement> & {
     replacement?: unknown;
   };
-  const pdfHost = { className: "oss-pdf-viewer" };
+  const pdfHost = mediaElement("DIV", "") as ReturnType<typeof mediaElement> & { className: string };
+  pdfHost.className = "oss-pdf-viewer";
   const mounts: string[] = [];
   const names: Array<string | undefined> = [];
   image.setAttribute("alt", "百鸟数据-声纹检测报告.pdf");
@@ -261,19 +289,23 @@ test("expands a Live Preview PDF host without replacing its editable CodeMirror 
     closest(selector: string): Element | null;
   };
   const hostClasses: string[] = [];
+  const blockClasses: string[] = [];
   const wrapperClasses: string[] = [];
   const lineClasses: string[] = [];
   const embedHost = { classList: { add: (name: string) => hostClasses.push(name) } };
+  const blockHost = { classList: { add: (name: string) => blockClasses.push(name) } };
   const wrapper = { classList: { add: (name: string) => wrapperClasses.push(name) } };
   const line = { classList: { add: (name: string) => lineClasses.push(name) } };
   image.closest = (selector: string) => {
     if (selector === ".markdown-source-view") return {} as Element;
     if (selector === ".image-wrapper") return wrapper as unknown as Element;
-    if (selector.includes(".cm-embed-block")) return embedHost as unknown as Element;
+    if (selector === ".cm-embed-block") return blockHost as unknown as Element;
+    if (selector.includes(".internal-embed")) return embedHost as unknown as Element;
     if (selector === ".cm-line") return line as unknown as Element;
     return null;
   };
-  const pdfCard = { className: "oss-pdf-attachment" };
+  const pdfCard = mediaElement("DIV", "") as ReturnType<typeof mediaElement> & { className: string };
+  pdfCard.className = "oss-pdf-attachment";
 
   await hydrateOssSubtree(image as unknown as ParentNode, {
     resolve: async () => "https://signed.example/vault/a.pdf",
@@ -282,6 +314,7 @@ test("expands a Live Preview PDF host without replacing its editable CodeMirror 
   });
 
   assert.deepEqual(hostClasses, ["oss-pdf-live-preview-host"]);
+  assert.deepEqual(blockClasses, ["oss-pdf-live-preview-block"]);
   assert.deepEqual(wrapperClasses, ["oss-pdf-live-preview-wrapper"]);
   assert.deepEqual(lineClasses, ["oss-pdf-live-preview-line"]);
   assert.equal(image.replacement, pdfCard);
@@ -291,7 +324,8 @@ test("replaces an existing PDF embed with the shared browser link", async () => 
   const embed = mediaElement("EMBED", "oss://vault/legacy.pdf") as ReturnType<typeof mediaElement> & {
     replacement?: unknown;
   };
-  const host = { className: "oss-pdf-viewer" };
+  const host = mediaElement("DIV", "") as ReturnType<typeof mediaElement> & { className: string };
+  host.className = "oss-pdf-viewer";
 
   await hydrateOssSubtree(embed as unknown as ParentNode, {
     resolve: async () => "https://signed.example/vault/legacy.pdf",
@@ -348,4 +382,336 @@ test("clears a visible OSS error after the node switches to a local source", asy
   });
 
   assert.equal(image.errorText, "");
+});
+
+test("binds the OSS menu before signing so permanent actions survive signing failure", async () => {
+  const image = mediaElement("IMG", "oss://vault/failed.mp4");
+  const bound: Array<{ kind: string; key: string }> = [];
+
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => { throw new Error("offline"); },
+  }, undefined, {
+    bind: (_element, kind, _url, key) => bound.push({ kind, key }),
+  });
+
+  assert.deepEqual(bound, [{ kind: "video", key: "vault/failed.mp4" }]);
+  assert.equal(image.errorText, "OSS 媒体签名失败: vault/failed.mp4");
+});
+
+test("cleans menu state when CodeMirror reuses an OSS node for a local source", async () => {
+  const image = mediaElement("IMG", "oss://vault/a.jpg");
+  let unbound = 0;
+  const binder = {
+    bind: () => undefined,
+    unbind: () => { unbound += 1; },
+  };
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/vault/a.jpg",
+  }, undefined, binder);
+
+  image.src = "app://local/image.jpg";
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => { throw new Error("local media must not be signed"); },
+  }, undefined, binder);
+
+  assert.equal(unbound, 1);
+  assert.equal(image.dataset.ossRenderKey, undefined);
+});
+
+test("resets an existing render session onto the current signing generation", async () => {
+  const image = mediaElement("IMG", "oss://vault/a.jpg");
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/old.jpg",
+  });
+  assert.equal(image.src, "https://signed.example/old.jpg");
+
+  await resetOssRenderSessions(image as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/new.jpg",
+  });
+
+  assert.equal(image.src, "https://signed.example/new.jpg");
+});
+
+test("reset preserves a replaced media label, source path and single-owner cleanup", async () => {
+  const image = mediaElement("IMG", "oss://vault/interview.mp3") as ReturnType<typeof mediaElement> & {
+    ownerDocument?: { createElement(tag: string): unknown };
+    replacement?: ReturnType<typeof mediaElement>;
+  };
+  image.ownerDocument = {
+    createElement: (tag: string) => mediaElement(tag.toUpperCase(), ""),
+  };
+  image.setAttribute("alt", "访谈录音.mp3");
+  const boundSourcePaths: Array<string | undefined> = [];
+  let unbound = 0;
+  const binder: AttachmentContextMenuBinder = {
+    bind: (_element, _kind, _url, _key, sourcePath) => {
+      boundSourcePaths.push(sourcePath);
+    },
+    unbind: () => { unbound += 1; },
+    sourcePathFor: () => "notes/interview.md",
+  };
+
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/old.mp3",
+  }, undefined, binder);
+  const audio = image.replacement!;
+  const unboundBeforeReset = unbound;
+
+  await resetOssRenderSessions(audio as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/new.mp3",
+  }, undefined, binder);
+
+  assert.equal(audio.src, "https://signed.example/new.mp3");
+  assert.equal(audio.getAttribute("alt"), "访谈录音.mp3");
+  assert.equal(audio.dataset.ossDisplayName, "访谈录音.mp3");
+  assert.equal(boundSourcePaths.at(-1), "notes/interview.md");
+  assert.equal(unbound, unboundBeforeReset + 1);
+});
+
+test("dispose releases the old menu owner and leaves a canonical source for hot reload", async () => {
+  const image = mediaElement("IMG", "oss://vault/hot.jpg");
+  let oldBindings = 0;
+  let oldUnbindings = 0;
+  const oldMenu: AttachmentContextMenuBinder = {
+    bind: () => { oldBindings += 1; },
+    unbind: () => { oldUnbindings += 1; },
+  };
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://old.example/hot.jpg",
+  }, undefined, oldMenu);
+
+  disposeOssRenderSessions(image as unknown as ParentNode, oldMenu);
+
+  assert.equal(oldBindings, 1);
+  assert.equal(oldUnbindings, 1);
+  assert.equal(image.src, "oss:///vault/hot.jpg");
+  assert.equal(image.dataset.ossRenderKey, undefined);
+
+  let newBindings = 0;
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://new.example/hot.jpg",
+  }, undefined, {
+    bind: () => { newBindings += 1; },
+  });
+
+  assert.equal(newBindings, 1);
+  assert.equal(oldUnbindings, 1);
+  assert.equal(image.src, "https://new.example/hot.jpg");
+});
+
+test("dispose recursively removes a Live Preview slot and every expanded host class", async () => {
+  const classTarget = () => {
+    const names = new Set<string>();
+    return {
+      names,
+      element: {
+        classList: {
+          add: (name: string) => names.add(name),
+          remove: (name: string) => names.delete(name),
+        },
+      } as unknown as Element,
+    };
+  };
+  const wrapper = classTarget();
+  const block = classTarget();
+  const line = classTarget();
+  const hostClasses = new Set<string>();
+  const nativeControl = { className: "internal-embed-button" };
+  let slot: (ReturnType<typeof mediaElement> & { className: string; replaceChildren(child: unknown): void; remove(): void }) | null = null;
+  const host = mediaElement("SPAN", "oss://vault/live.mp3") as ReturnType<typeof mediaElement> & {
+    matches(selector: string): boolean;
+    querySelector(selector: string): unknown;
+    appendChild(child: unknown): void;
+    children: unknown[];
+    classList: { add(name: string): void; remove(name: string): void };
+    ownerDocument: { createElement(tag: string): ReturnType<typeof mediaElement> & { className: string; replaceChildren(child: unknown): void; remove(): void } };
+  };
+  host.children = [nativeControl];
+  host.matches = (selector) => selector === '.internal-embed[src^="oss://"]';
+  host.querySelector = (selector) => selector === ":scope > .oss-render-slot" ? slot : null;
+  host.appendChild = (child) => {
+    slot = child as typeof slot;
+    host.children.push(child);
+  };
+  host.classList = {
+    add: (name) => hostClasses.add(name),
+    remove: (name) => hostClasses.delete(name),
+  };
+  host.closest = (selector: string) => {
+    if (selector === ".markdown-source-view") return {} as Element;
+    if (selector === ".image-wrapper") return wrapper.element;
+    if (selector === ".cm-embed-block") return block.element;
+    if (selector.includes(".internal-embed")) return host as unknown as Element;
+    if (selector === ".cm-line") return line.element;
+    return null;
+  };
+  host.ownerDocument = {
+    createElement: (tag) => {
+      const created = mediaElement(tag.toUpperCase(), "") as ReturnType<typeof mediaElement> & {
+        className: string;
+        replaceChildren(child: unknown): void;
+        remove(): void;
+      };
+      created.className = "";
+      created.replaceChildren = () => undefined;
+      created.remove = () => {
+        host.children = host.children.filter((child) => child !== created);
+        if (slot === created) slot = null;
+      };
+      return created;
+    },
+  };
+  let unbound = 0;
+  const menu: AttachmentContextMenuBinder = {
+    bind: () => undefined,
+    unbind: () => { unbound += 1; },
+  };
+
+  await hydrateOssSubtree(host as unknown as ParentNode, {
+    resolve: async () => "https://old.example/live.mp3",
+  }, undefined, menu);
+  assert.ok(slot);
+  assert.ok(wrapper.names.size && block.names.size && line.names.size && hostClasses.size);
+
+  disposeOssRenderSessions(host as unknown as ParentNode, menu);
+
+  assert.equal(slot, null);
+  assert.deepEqual(host.children, [nativeControl]);
+  assert.equal(wrapper.names.size, 0);
+  assert.equal(block.names.size, 0);
+  assert.equal(line.names.size, 0);
+  assert.equal(hostClasses.size, 0);
+  assert.equal(host.src, "oss:///vault/live.mp3");
+  assert.equal(host.dataset.ossRenderKey, undefined);
+  assert.equal(unbound, 2, "host and plugin-slot media each release one binding");
+});
+
+test("dispose turns a plugin PDF card back into a hot-reloadable canonical placeholder", async () => {
+  const image = mediaElement("IMG", "oss://vault/report.pdf") as ReturnType<typeof mediaElement> & {
+    ownerDocument: { createElement(tag: string): ReturnType<typeof mediaElement> };
+    replacement?: ReturnType<typeof mediaElement>;
+  };
+  image.setAttribute("alt", "季度报告.pdf");
+  const card = mediaElement("DIV", "") as ReturnType<typeof mediaElement> & {
+    querySelector(selector: string): { textContent: string } | null;
+    ownerDocument: { createElement(tag: string): ReturnType<typeof mediaElement> };
+    replacement?: ReturnType<typeof mediaElement>;
+  };
+  const createElement = (tag: string) => mediaElement(tag.toUpperCase(), "");
+  image.ownerDocument = { createElement };
+  card.ownerDocument = { createElement };
+  card.querySelector = (selector) => selector === ".oss-pdf-name" ? { textContent: "季度报告.pdf" } : null;
+
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://old.example/report.pdf",
+  }, {
+    mount: () => card as unknown as HTMLElement,
+  });
+  disposeOssRenderSessions(card as unknown as ParentNode);
+
+  const placeholder = card.replacement!;
+  assert.equal(placeholder.tagName, "IMG");
+  assert.equal(placeholder.src, "oss:///vault/report.pdf");
+  assert.equal(placeholder.getAttribute("alt"), "季度报告.pdf");
+  assert.equal(card.dataset.ossRenderKey, undefined);
+
+  let remounted = 0;
+  await hydrateOssSubtree(placeholder as unknown as ParentNode, {
+    resolve: async () => "https://new.example/report.pdf",
+  }, {
+    mount: () => {
+      remounted += 1;
+      return mediaElement("DIV", "") as unknown as HTMLElement;
+    },
+  });
+  assert.equal(remounted, 1);
+});
+
+test("repeated hydration keeps the newest context-menu binding", async () => {
+  const image = mediaElement("IMG", "oss://vault/retry.jpg");
+  let release!: (url: string) => void;
+  let bound = false;
+  let binds = 0;
+  let unbinds = 0;
+  const binder: AttachmentContextMenuBinder = {
+    bind: () => {
+      bound = true;
+      binds += 1;
+    },
+    unbind: () => {
+      bound = false;
+      unbinds += 1;
+    },
+  };
+  const resolver = {
+    resolve: () => new Promise<string>((resolve) => { release = resolve; }),
+  };
+
+  const first = hydrateOssSubtree(image as unknown as ParentNode, resolver, undefined, binder);
+  await Promise.resolve();
+  await hydrateOssSubtree(image as unknown as ParentNode, resolver, undefined, binder);
+
+  assert.equal(binds, 2);
+  assert.equal(unbinds, 1);
+  assert.equal(bound, true, "the second bind must happen after the old cleanup");
+
+  release("https://signed.example/vault/retry.jpg");
+  await first;
+  assert.equal(bound, true);
+});
+
+test("render lifetime restores a completed detached Reading fragment on unload", async () => {
+  const image = mediaElement("IMG", "oss://vault/detached.jpg");
+  const lifetime = new RenderSessionLifetime();
+  let unbound = 0;
+
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/vault/detached.jpg",
+  }, undefined, {
+    bind: () => undefined,
+    unbind: () => { unbound += 1; },
+  }, lifetime);
+  assert.equal(image.src, "https://signed.example/vault/detached.jpg");
+
+  lifetime.dispose();
+
+  assert.equal(image.src, "oss:///vault/detached.jpg");
+  assert.equal(image.dataset.ossRenderKey, undefined);
+  assert.equal(unbound, 1);
+});
+
+test("render lifetime blocks a detached fragment's in-flight signature after unload", async () => {
+  const image = mediaElement("IMG", "oss://vault/pending.jpg");
+  const lifetime = new RenderSessionLifetime();
+  let release!: (url: string) => void;
+  const processing = hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: () => new Promise<string>((resolve) => { release = resolve; }),
+  }, undefined, undefined, lifetime);
+  await Promise.resolve();
+
+  lifetime.dispose();
+  release("https://stale.example/vault/pending.jpg");
+  await processing;
+
+  assert.equal(image.src, "oss:///vault/pending.jpg");
+  assert.equal(image.errorText, "");
+  assert.equal(image.dataset.ossRenderKey, undefined);
+});
+
+test("configuration reset re-signs detached sessions through the shared lifetime", async () => {
+  const first = mediaElement("IMG", "oss://vault/first.jpg");
+  const second = mediaElement("IMG", "oss://vault/second.jpg");
+  const lifetime = new RenderSessionLifetime();
+  let generation = "old";
+  const resolver = {
+    resolve: async (key: string) => `https://${generation}.example/${key}`,
+  };
+
+  await hydrateOssSubtree(first as unknown as ParentNode, resolver, undefined, undefined, lifetime);
+  await hydrateOssSubtree(second as unknown as ParentNode, resolver, undefined, undefined, lifetime);
+  generation = "new";
+  await resetOssRenderLifetime(lifetime, resolver);
+
+  assert.equal(first.src, "https://new.example/vault/first.jpg");
+  assert.equal(second.src, "https://new.example/vault/second.jpg");
 });

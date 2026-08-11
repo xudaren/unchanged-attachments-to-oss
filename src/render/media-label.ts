@@ -6,15 +6,18 @@ export function mediaDisplayName(source: Element): string {
 }
 
 /** Add one visible Markdown-alt label without wrapping Obsidian's editable host. */
-export function mountMediaLabel(media: HTMLElement, name: string, key: string, host?: Element): void {
+export function mountMediaLabel(media: HTMLElement, name: string, key: string, host?: Element): HTMLElement | null {
+  if (!name) return null;
   const container = resolveMediaContainer(media, host);
   container?.classList?.add("oss-media-caption-host");
-  if (!name) return;
+  container?.querySelectorAll?.(":scope > .oss-media-label").forEach((label) => {
+    if ((label as HTMLElement).dataset.ossKey !== key) label.remove();
+  });
   const existing = container?.querySelector?.<HTMLElement>(`:scope > .oss-media-label[data-oss-key="${cssEscape(key)}"]`);
   if (existing) {
     existing.textContent = name;
     existing.title = name;
-    return;
+    return existing;
   }
   const label = media.ownerDocument.createElement("div");
   label.className = "oss-media-label";
@@ -23,6 +26,7 @@ export function mountMediaLabel(media: HTMLElement, name: string, key: string, h
   label.title = name;
   if (container) container.appendChild(label);
   else media.insertAdjacentElement("afterend", label);
+  return label;
 }
 
 function resolveMediaContainer(media: HTMLElement, explicit?: Element): HTMLElement | null {
@@ -34,6 +38,7 @@ function resolveMediaContainer(media: HTMLElement, explicit?: Element): HTMLElem
   if (!parent) return null;
   const frame = media.ownerDocument.createElement("div");
   frame.className = "oss-media-caption-host";
+  frame.dataset.ossMediaFrame = "true";
   media.replaceWith(frame);
   frame.appendChild(media);
   return frame;

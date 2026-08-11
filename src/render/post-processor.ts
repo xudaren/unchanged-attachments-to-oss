@@ -1,185 +1,42 @@
 import { MarkdownPostProcessorContext } from "obsidian";
 import { PluginSettings } from "../types";
-import { RENDER_SURFACE_SELECTOR } from "./dom-renderer";
-import { clearOssRenderError, showOssRenderError } from "./error-state";
-import { ossKeyFromImageSource } from "./oss-source";
+import {
+  hydrateOssSubtree,
+  RENDER_SURFACE_SELECTOR,
+} from "./dom-renderer";
 import { SignedUrlResolver } from "./url-resolver";
 import { defaultPdfRenderer, PdfRenderer } from "./pdf-link";
-import type { AttachmentContextMenuBinder, AttachmentKind } from "./context-menu";
-import { loadImageNearViewport, loadMediaOnInteraction, loadVideoNearViewport } from "./media-loading";
-import { mediaDisplayName, mountMediaLabel } from "./media-label";
+import type { AttachmentContextMenuBinder } from "./context-menu";
+import type { RenderSessionLifetime } from "./lifetime";
 
-/**
- * Reading View 后处理：遍历 <img>/<video>/<audio>/<a>，
- * 将 `oss://{key}` 替换为动态签名 URL；不同媒体渲染为对应元素。
- */
+/** Reading View owns only its current rendered fragment; Live Preview/Canvas use the observer. */
 export function createOssPostProcessor(
-  settings: PluginSettings,
+  _settings: PluginSettings,
   resolver: SignedUrlResolver,
   pdfRenderer: PdfRenderer = defaultPdfRenderer,
   contextMenu?: AttachmentContextMenuBinder,
+  lifetime?: RenderSessionLifetime,
 ) {
   return async function processor(el: HTMLElement, ctx: MarkdownPostProcessorContext) {
-    // Live Preview 与 Canvas 由增量 Observer 独占，避免同一节点被两条管线重复处理。
-    if (el.closest(RENDER_SURFACE_SELECTOR)) return;
-
-    // Obsidian 会把 ![](oss://xxx) 渲染成 <img src="oss://xxx"> 或视为普通链接
-    // 我们统一按 src / href 属性扫一遍
-    const nodes = collectOssNodes(el);
-    const results = await Promise.allSettled(
-      nodes.map((node) => hydrateNode(node, settings, resolver, pdfRenderer, contextMenu, ctx.sourcePath)),
-    );
-    results.forEach((result, index) => {
-      if (result.status !== "rejected") return;
-      const node = nodes[index];
-      if (
-        currentOssKey(node) !== node.key ||
-        (node.el as HTMLElement).closest?.(RENDER_SURFACE_SELECTOR)
-      ) return;
-      showOssRenderError(
-        node.el,
-        node.key,
-        `OSS 媒体签名失败: ${node.key}`,
-      );
-    });
+    if ((lifetime && !lifetime.isActive) || el.closest(RENDER_SURFACE_SELECTOR)) return;
+    const scopedMenu = contextMenu ? withSourcePath(contextMenu, ctx.sourcePath) : undefined;
+    await hydrateOssSubtree(el, resolver, pdfRenderer, scopedMenu, lifetime);
   };
 }
 
-interface OssNode {
-  el: Element;
-  key: string;
-  /** 原始元素类型：img / a / video / audio / source */
-  kind: "img" | "video" | "audio" | "a" | "embed" | "unknown";
-}
-
-function collectOssNodes(root: HTMLElement): OssNode[] {
-  const out: OssNode[] = [];
-  root.querySelectorAll("img").forEach((el) => {
-    const key = ossKeyFromImageSource(el.getAttribute("src") ?? "");
-    if (key) out.push({ el, key, kind: "img" });
-  });
-  root.querySelectorAll("video, audio").forEach((el) => {
-    const src = el.getAttribute("src");
-    const key = src ? ossKeyFromImageSource(src) : null;
-    if (key) out.push({ el, key, kind: el.tagName.toLowerCase() === "video" ? "video" : "audio" });
-  });
-  root.querySelectorAll("a").forEach((el) => {
-    const key = ossKeyFromImageSource(el.getAttribute("href") ?? "");
-    if (key) out.push({ el, key, kind: "a" });
-  });
-  root.querySelectorAll("embed").forEach((el) => {
-    const key = ossKeyFromImageSource(el.getAttribute("src") ?? "");
-    if (key) out.push({ el, key, kind: "embed" });
-  });
-  return out;
-}
-
-async function hydrateNode(
-  node: OssNode,
-  settings: PluginSettings,
-  resolver: SignedUrlResolver,
-  pdfRenderer: PdfRenderer,
-  contextMenu?: AttachmentContextMenuBinder,
-  sourcePath?: string,
-): Promise<void> {
-  if (node.key.startsWith("uploading/")) return;
-  if (!settings.bucketName || !settings.accessKeyId || !settings.accessKeySecret) {
-    showOssRenderError(node.el, node.key, `OSS 未配置: ${node.key}`);
-    return;
-  }
-  const html = node.el as HTMLElement;
-  if (html.dataset.ossSigningKey === node.key) return;
-
-  html.dataset.ossSigningKey = node.key;
-  try {
-    const url = await resolver.resolve(node.key);
-    if (html.dataset.ossSigningKey !== node.key || currentOssKey(node) !== node.key) return;
-    clearOssRenderError(node.el);
-    const ext = keyExt(node.key);
-
-    // 若原元素类型与实际媒体不匹配（如 mp4 被渲染成 <img>），替换为合适元素
-    const desired = mediaKindOfExt(ext);
-    const displayName = mediaDisplayName(node.el);
-    if (desired === "embed" || (desired && desired !== node.kind && (node.kind === "img" || node.kind === "a"))) {
-      const replaced = buildMediaElement(desired, url, node.el, node.key, pdfRenderer);
-      contextMenu?.bind(replaced, contextKind(desired), url, node.key, sourcePath);
-      node.el.replaceWith(replaced);
-      if (desired !== "embed") mountMediaLabel(replaced, displayName, node.key);
-    } else if (node.kind === "img") {
-      loadImageNearViewport(node.el as HTMLImageElement, url, node.key);
-    } else if (node.kind === "video") {
-      loadVideoNearViewport(node.el as HTMLVideoElement, url);
-    } else if (node.kind === "audio") {
-      loadMediaOnInteraction(node.el as HTMLMediaElement, url);
-    } else if (node.kind === "a") {
-      (node.el as HTMLAnchorElement).href = url;
-      (node.el as HTMLAnchorElement).target = "_blank";
-    } else if (node.kind === "embed") {
-      (node.el as HTMLEmbedElement).src = url;
-    }
-    if (desired && !(desired === "embed" || (desired !== node.kind && (node.kind === "img" || node.kind === "a")))) {
-      contextMenu?.bind(node.el as HTMLElement, contextKind(desired), url, node.key, sourcePath);
-      mountMediaLabel(node.el as HTMLElement, displayName, node.key);
-    }
-  } catch (error) {
-    if (html.dataset.ossSigningKey !== node.key || currentOssKey(node) !== node.key) return;
-    throw error;
-  } finally {
-    if (html.dataset.ossSigningKey === node.key) delete html.dataset.ossSigningKey;
-  }
-}
-
-function currentOssKey(node: OssNode): string | null {
-  const attribute = node.kind === "a" ? "href" : "src";
-  return ossKeyFromImageSource(node.el.getAttribute(attribute) ?? "");
-}
-
-function keyExt(key: string): string {
-  const idx = key.lastIndexOf(".");
-  return idx >= 0 ? key.slice(idx + 1).toLowerCase() : "";
-}
-
-type MediaKind = "img" | "video" | "audio" | "embed";
-
-function contextKind(kind: MediaKind): AttachmentKind {
-  return kind === "embed" ? "pdf" : kind;
-}
-
-function mediaKindOfExt(ext: string): MediaKind | null {
-  if (["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp"].includes(ext)) return "img";
-  if (["mp4", "mov", "webm", "mkv", "ogv", "m4v"].includes(ext)) return "video";
-  if (["mp3", "wav", "m4a", "ogg", "flac", "aac", "opus"].includes(ext)) return "audio";
-  if (ext === "pdf") return "embed";
-  return null;
-}
-
-function buildMediaElement(
-  kind: MediaKind,
-  url: string,
-  from: Element,
-  key: string,
-  pdfRenderer: PdfRenderer,
-): HTMLElement {
-  if (kind === "img") {
-    const img = document.createElement("img");
-    img.alt = from.getAttribute("alt") ?? "";
-    img.setAttribute("src", `oss://${key}`);
-    loadImageNearViewport(img, url, key);
-    return img;
-  }
-  if (kind === "video") {
-    const v = document.createElement("video");
-    v.controls = true;
-    v.style.maxWidth = "100%";
-    loadVideoNearViewport(v, url);
-    return v;
-  }
-  if (kind === "audio") {
-    const a = document.createElement("audio");
-    a.controls = true;
-    loadMediaOnInteraction(a, url);
-    return a;
-  }
-  // pdf
-  return pdfRenderer.mount(from, url, key, from.getAttribute("alt") ?? from.textContent ?? undefined);
+function withSourcePath(
+  contextMenu: AttachmentContextMenuBinder,
+  sourcePath: string,
+): AttachmentContextMenuBinder {
+  return {
+    bind(element, kind, url, key) {
+      contextMenu.bind(element, kind, url, key, sourcePath);
+    },
+    unbind(element) {
+      contextMenu.unbind?.(element);
+    },
+    sourcePathFor() {
+      return sourcePath;
+    },
+  };
 }

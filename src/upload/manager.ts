@@ -1,25 +1,36 @@
 import { Notice } from "obsidian";
+import { normalizeObjectKeyPrefix, normalizeOssEndpoint } from "../config";
 import { OssClient, OssError } from "../oss/client";
-import { PendingUpload, PluginSettings, mimeOf } from "../types";
+import { normalizeSigningRegion } from "../oss/signer";
+import { LifecycleGate, LifecycleQuiescedError } from "../lifecycle";
+import {
+  PendingReferenceLocator,
+  PendingUpload,
+  PluginSettings,
+  StorageIdentity,
+  UploadPhase,
+  mimeOf,
+} from "../types";
 
-const PART_SIZE = 4 * 1024 * 1024; // 4 MB
+const PART_SIZE = 4 * 1024 * 1024;
+const MAX_PARTS = 10_000;
 const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 1000; // 指数退避基底 1s
+const BASE_DELAY_MS = 1000;
 
 export interface UploadRequest {
-  /** blob 内容源 */
   blob: Blob;
-  /** 扩展名（不含 .） */
   ext: string;
-  /** 关联 md 文件路径（失败回写用） */
   sourcePath: string;
-  /** 已落地本地附件路径；续传身份校验用 */
   localPath?: string;
-  /** 已存在的续传状态（可选） */
+  stagingPath?: string;
+  tempId?: string;
+  displayName?: string;
+  locator?: PendingReferenceLocator;
+  sourceMtime?: number;
   resume?: PendingUpload;
-  /** 引用实例标识，用于区分同一文档内的重复引用 */
   occurrenceId?: string;
-  /** 进度回调：参数为已完成分片数和总分片数 */
+  /** Automatic editor/create flow. Manual retry and migration intentionally omit this. */
+  automatic?: boolean;
   onProgress?: (done: number, total: number) => void;
 }
 
@@ -28,224 +39,603 @@ export interface UploadResult {
   tempId: string;
 }
 
+export interface PrepareStagedUploadRequest {
+  tempId: string;
+  ext: string;
+  size: number;
+  sourcePath: string;
+  localPath: string;
+  stagingPath: string;
+  displayName: string;
+  occurrenceId: string;
+  locator: PendingReferenceLocator;
+  sourceMtime?: number;
+}
+
 export class UploadPausedError extends Error {
-  constructor(public readonly tempId: string, cause: unknown) {
-    super(`上传已暂停，可稍后续传：${cause instanceof Error ? cause.message : String(cause)}`);
+  constructor(public readonly tempId: string, public readonly reason: unknown) {
+    super(`上传已暂停，可稍后续传：${reason instanceof Error ? reason.message : String(reason)}`);
     this.name = "UploadPausedError";
   }
 }
 
-/**
- * 上传管理器：负责所有附件的 Multipart 上传全流程。
- *
- * - 4 MB 分片，Blob.slice 惰性读取
- * - 每片成功后立即 persist 到 data.json，支持断点续传
- * - 失败调用 AbortMultipartUpload；未 abort 的挂起状态由启动时清理任务兜底
- */
+export function isLifecycleUploadPause(error: unknown): boolean {
+  return error instanceof LifecycleQuiescedError ||
+    error instanceof UploadPausedError && error.reason instanceof LifecycleQuiescedError;
+}
+
+export class AutoUploadPausedError extends Error {
+  constructor() {
+    super("自动上传已关闭，任务已安全暂停");
+    this.name = "AutoUploadPausedError";
+  }
+}
+
+export class LegacyStorageIdentityError extends Error {
+  constructor(public readonly tempId: string) {
+    super("旧上传任务缺少 Bucket / Endpoint 身份，无法安全确认其远端归属；本地文件与任务日志已保留");
+    this.name = "LegacyStorageIdentityError";
+  }
+}
+
+export class StorageIdentityMismatchError extends Error {
+  constructor(public readonly tempId: string) {
+    super("上传任务属于另一组 Bucket / Endpoint / Region / Object Key 前缀，请恢复原存储配置后重试");
+    this.name = "StorageIdentityMismatchError";
+  }
+}
+
+export class UploadSourceChangedError extends Error {
+  constructor(public readonly tempId: string) {
+    super("本地附件的大小、扩展名或修改时间已变化，已阻止续传到旧任务");
+    this.name = "UploadSourceChangedError";
+  }
+}
+
+/** Durable Multipart state machine shared by direct input, fallback and migration. */
 export class UploadManager {
+  private persistTail: Promise<void> = Promise.resolve();
+
   constructor(
-    private readonly client: OssClient,
+    private client: OssClient,
     private readonly settings: PluginSettings,
     private readonly persist: () => Promise<void>,
+    private readonly lifecycle?: LifecycleGate,
   ) {}
 
-  /**
-   * 执行一次完整上传。抛出异常时 pendingUploads 中会保留状态，供后续续传。
-   */
+  /** Switch credentials/client for future calls; task identity validation still gates every resume. */
+  setClient(client: OssClient): void {
+    this.client = client;
+  }
+
+  /** Journal a direct-input task after its staging bytes exist and before any network call. */
+  async prepareStagedTask(req: PrepareStagedUploadRequest): Promise<PendingUpload> {
+    const existing = this.settings.pendingUploads[req.tempId];
+    if (existing) return existing;
+    const prefix = normalizeObjectKeyPrefix(this.settings.objectKeyPrefix);
+    const pending: PendingUpload = {
+      tempId: req.tempId,
+      objectKey: `${prefix}/${crypto.randomUUID()}.${req.ext.toLowerCase()}`,
+      uploadId: "",
+      ext: req.ext.toLowerCase(),
+      size: req.size,
+      parts: [],
+      phase: "staged",
+      sourcePath: req.sourcePath,
+      occurrenceId: req.occurrenceId,
+      localPath: req.localPath,
+      stagingPath: req.stagingPath,
+      displayName: req.displayName,
+      locator: req.locator,
+      storageIdentity: currentStorageIdentity(this.settings),
+      sourceMtime: req.sourceMtime,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    this.settings.pendingUploads[pending.tempId] = pending;
+    await this.persistState();
+    return pending;
+  }
+
+  async discardMissingStagingTask(tempId: string): Promise<void> {
+    const pending = this.settings.pendingUploads[tempId];
+    if (!pending || phaseOf(pending) !== "staged" || pending.uploadId) return;
+    delete this.settings.pendingUploads[tempId];
+    await this.persistState();
+  }
+
   async upload(req: UploadRequest): Promise<UploadResult> {
+    this.lifecycle?.assertActive("开始上传任务");
+    const beforeSend = req.automatic
+      ? () => this.assertAutomaticUploadEnabled(req)
+      : undefined;
     const size = req.blob.size;
+    const totalParts = Math.max(1, Math.ceil(size / PART_SIZE));
+    if (totalParts > MAX_PARTS) {
+      throw new Error(`附件过大：固定 4 MB 分片最多支持 ${MAX_PARTS} 片`);
+    }
+
     let pending = req.resume ?? this.findResume(req);
-    if (!pending) {
-      const tempId = crypto.randomUUID();
-      const prefix = this.settings.objectKeyPrefix || "obsidian";
-      const objectKey = `${prefix.replace(/\/+$/, "")}/${crypto.randomUUID()}.${req.ext.toLowerCase()}`;
-      const { uploadId } = await this.client.initiateMultipart(objectKey, mimeOf(req.ext));
+    if (pending) {
+      if (!pending.storageIdentity && req.automatic) this.assertAutomaticUploadEnabled(req);
+      await this.ensureTaskStorageIdentity(pending, beforeSend);
+      this.assertResumeSource(pending, req);
+    } else {
+      const tempId = req.tempId ?? crypto.randomUUID();
+      const prefix = normalizeObjectKeyPrefix(this.settings.objectKeyPrefix);
       pending = {
         tempId,
-        objectKey,
-        uploadId,
+        objectKey: `${prefix.replace(/\/+$/, "")}/${crypto.randomUUID()}.${req.ext.toLowerCase()}`,
+        uploadId: "",
         ext: req.ext.toLowerCase(),
         size,
         parts: [],
-        phase: "uploading",
+        phase: "staged",
         sourcePath: req.sourcePath,
         occurrenceId: req.occurrenceId,
         localPath: req.localPath,
+        stagingPath: req.stagingPath,
+        displayName: req.displayName,
+        locator: req.locator,
+        storageIdentity: currentStorageIdentity(this.settings),
+        sourceMtime: req.sourceMtime,
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
       this.settings.pendingUploads[tempId] = pending;
-      await this.persist();
+      // No network request is allowed until the staged task is durable.
+      await this.persistState();
     }
 
-    // OSS 对象已经完成，仅重试引用提交，不得重复上传。
-    if (pending.phase === "uploaded") {
-      return { tempId: pending.tempId, objectKey: pending.objectKey };
+    const phase = phaseOf(pending);
+    if (phase === "uploaded" || phase === "reference_committing" || phase === "cleanup_pending") {
+      return resultOf(pending);
     }
-
-    const totalParts = Math.max(1, Math.ceil(size / PART_SIZE));
-    const doneNumbers = new Set(pending.parts.map((p) => p.partNumber));
-    req.onProgress?.(doneNumbers.size, totalParts);
 
     try {
-      for (let n = 1; n <= totalParts; n++) {
-        if (doneNumbers.has(n)) continue;
-        const start = (n - 1) * PART_SIZE;
-        const end = Math.min(start + PART_SIZE, size);
-        const chunk = req.blob.slice(start, end);
-        const buf = await chunk.arrayBuffer();
-        const { etag } = await withRetry(() =>
-          this.client.uploadPart({
-            key: pending!.objectKey,
-            uploadId: pending!.uploadId,
-            partNumber: n,
-            body: buf,
-          }),
+      if (phaseOf(pending) === "staged") {
+        const { uploadId } = await withRetry(
+          () => {
+            this.assertAutomaticUploadEnabled(req);
+            return this.client.initiateMultipart(
+              pending!.objectKey,
+              mimeOf(pending!.ext),
+              beforeSend,
+            );
+          },
           isRecoverableUploadError,
+          this.lifecycle,
         );
-        pending.parts.push({ partNumber: n, etag });
-        pending.updatedAt = Date.now();
-        await this.persist();
-        req.onProgress?.(pending.parts.length, totalParts);
+        pending.uploadId = uploadId;
+        await this.transition(pending, "uploading");
       }
 
-      await withRetry(() =>
-        this.client.completeMultipart({
-          key: pending!.objectKey,
-          uploadId: pending!.uploadId,
-          parts: pending!.parts,
-        }),
-        isRecoverableUploadError,
-      );
+      if (phaseOf(pending) === "uploading") {
+        const doneNumbers = new Set(pending.parts.map((part) => part.partNumber));
+        req.onProgress?.(doneNumbers.size, totalParts);
+        for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+          if (doneNumbers.has(partNumber)) continue;
+          const start = (partNumber - 1) * PART_SIZE;
+          const body = await req.blob.slice(start, Math.min(start + PART_SIZE, size)).arrayBuffer();
+          const { etag } = await withRetry(
+            () => {
+              this.assertAutomaticUploadEnabled(req);
+              return this.client.uploadPart({
+                key: pending!.objectKey,
+                uploadId: pending!.uploadId,
+                partNumber,
+                body,
+                beforeSend,
+              });
+            },
+            isRecoverableUploadError,
+            this.lifecycle,
+          );
+          pending.parts.push({ partNumber, etag });
+          pending.updatedAt = Date.now();
+          await this.persistState();
+          req.onProgress?.(pending.parts.length, totalParts);
+        }
+        // Persist the ambiguous boundary before asking OSS to assemble the object.
+        await this.transition(pending, "completing");
+      }
 
-      pending.phase = "uploaded";
-      pending.updatedAt = Date.now();
-      await this.persist();
-      return { tempId: pending.tempId, objectKey: pending.objectKey };
-    } catch (err) {
-      if (isRecoverableUploadError(err)) {
+      if (phaseOf(pending) === "completing") {
+        let completeFailed = false;
+        let completeError: unknown;
+        let confirmation: Awaited<ReturnType<OssClient["completeMultipart"]>> | undefined;
+        try {
+          confirmation = await withRetry(
+            () => {
+              this.assertAutomaticUploadEnabled(req);
+              return this.client.completeMultipart({
+                key: pending!.objectKey,
+                uploadId: pending!.uploadId,
+                parts: pending!.parts,
+                beforeSend,
+              });
+            },
+            isRecoverableUploadError,
+            this.lifecycle,
+          );
+        } catch (error) {
+          completeFailed = true;
+          completeError = error;
+        }
+        if (completeFailed) {
+          if (completeError instanceof AutoUploadPausedError) throw completeError;
+          const exists = await this.confirmCompletedObject(
+            pending.objectKey,
+            completeError,
+            beforeSend,
+          );
+          if (!exists) throw completeError;
+        } else if (!isCompleteConfirmation(confirmation, pending.objectKey)) {
+          const exists = await this.client.headObject(pending.objectKey, beforeSend);
+          if (!exists) throw new Error("CompleteMultipartUpload 响应无法确认，且目标 Object 不存在");
+        }
+        await this.transition(pending, "uploaded");
+      }
+
+      return resultOf(pending);
+    } catch (error) {
+      if (error instanceof StorageIdentityMismatchError || error instanceof UploadSourceChangedError) throw error;
+      // Once Complete has been attempted, even a nominally non-recoverable OSS
+      // error is ambiguous until HEAD confirms the target state. Never Abort and
+      // forget this boundary merely because the confirmation request also failed.
+      if (req.automatic && !this.settings.autoUpload ||
+          error instanceof AutoUploadPausedError || error instanceof LifecycleQuiescedError ||
+          isRecoverableUploadError(error) ||
+          phaseOf(pending) === "completing" ||
+          phaseOf(pending) === "uploaded") {
         pending.updatedAt = Date.now();
-        await this.persist();
-        throw new UploadPausedError(pending.tempId, err);
+        await this.persistState().catch(() => undefined);
+        throw new UploadPausedError(
+          pending.tempId,
+          req.automatic && !this.settings.autoUpload ? new AutoUploadPausedError() : error,
+        );
       }
-      console.error("[oss-upload] 不可恢复错误，触发 Abort", err);
-      try {
-        await this.client.abortMultipart(pending.objectKey, pending.uploadId);
-      } catch (abortErr) {
-        console.warn("[oss-upload] Abort 失败（可能已被服务端清理）", abortErr);
-      }
-      delete this.settings.pendingUploads[pending.tempId];
-      await this.persist();
-      throw err;
+      await this.abortAndForget(pending, error, beforeSend);
+      throw error;
     }
   }
 
-  async bindLocalPath(tempId: string, localPath: string): Promise<void> {
+  getPending(tempId: string): PendingUpload | undefined {
+    return this.settings.pendingUploads[tempId];
+  }
+
+  /** Verify and bind a legacy journal before any remote or destructive continuation. */
+  async ensurePendingStorageIdentity(tempId: string): Promise<void> {
     const pending = this.settings.pendingUploads[tempId];
-    if (!pending) return;
-    pending.localPath = localPath;
-    pending.updatedAt = Date.now();
-    await this.persist();
+    if (pending) await this.ensureTaskStorageIdentity(pending);
   }
 
-  /** 引用提交及本地清理全部成功后结束任务。 */
-  async finalize(tempId: string): Promise<void> {
-    if (!this.settings.pendingUploads[tempId]) return;
-    delete this.settings.pendingUploads[tempId];
-    await this.persist();
-  }
-
-  private findResume(req: UploadRequest): PendingUpload | undefined {
-    if (!req.localPath) return undefined;
+  findPendingFor(req: Pick<UploadRequest, "localPath" | "sourcePath" | "occurrenceId">): PendingUpload | undefined {
     return Object.values(this.settings.pendingUploads).find((pending) =>
+      Boolean(req.localPath) &&
       pending.localPath === req.localPath &&
       pending.sourcePath === req.sourcePath &&
-      pending.occurrenceId === req.occurrenceId &&
-      pending.size === req.blob.size &&
-      pending.ext === req.ext.toLowerCase()
+      pending.occurrenceId === req.occurrenceId
     );
   }
 
-  /** 主动放弃某个未完成上传：调 Abort 并清状态 */
-  async abort(tempId: string): Promise<void> {
-    const p = this.settings.pendingUploads[tempId];
-    if (!p) return;
-    try {
-      await this.client.abortMultipart(p.objectKey, p.uploadId);
-    } catch (err) {
-      console.warn("[oss-upload] Abort 失败（可能已被服务端清理）", err);
-    }
-    delete this.settings.pendingUploads[tempId];
-    await this.persist();
+  async bindLocalPath(tempId: string, localPath: string, clearStaging = false): Promise<void> {
+    const pending = this.settings.pendingUploads[tempId];
+    if (!pending) return;
+    pending.localPath = localPath;
+    if (clearStaging) pending.stagingPath = undefined;
+    pending.updatedAt = Date.now();
+    await this.persistState();
   }
 
-  /** 启动清理：找出 24h 未更新的本地 pending + 服务端孤儿，全部 abort */
+  /** Persist the exact ordinary-local reference before its staging copy is removed. */
+  async bindLocalRecovery(
+    tempId: string,
+    localPath: string,
+    locator: PendingReferenceLocator,
+    sourceMtime: number,
+    clearStaging = false,
+  ): Promise<void> {
+    const pending = this.settings.pendingUploads[tempId];
+    if (!pending) return;
+    pending.localPath = localPath;
+    pending.locator = locator;
+    pending.sourceMtime = sourceMtime;
+    if (clearStaging) pending.stagingPath = undefined;
+    pending.updatedAt = Date.now();
+    await this.persistState();
+  }
+
+  async markReferenceCommitting(tempId: string): Promise<void> {
+    const pending = this.settings.pendingUploads[tempId];
+    if (pending && phaseOf(pending) !== "cleanup_pending") {
+      await this.transition(pending, "reference_committing");
+    }
+  }
+
+  async markCleanupPending(tempId: string): Promise<void> {
+    const pending = this.settings.pendingUploads[tempId];
+    if (pending) await this.transition(pending, "cleanup_pending");
+  }
+
+  /** Remove one task only after its reference and local cleanup are both durable. */
+  async finalize(tempId: string): Promise<void> {
+    if (!this.settings.pendingUploads[tempId]) return;
+    delete this.settings.pendingUploads[tempId];
+    await this.persistState();
+  }
+
+  async finalizeCleanupForPath(localPath: string): Promise<void> {
+    let changed = false;
+    for (const [tempId, pending] of Object.entries(this.settings.pendingUploads)) {
+      if (pending.localPath === localPath && phaseOf(pending) === "cleanup_pending") {
+        delete this.settings.pendingUploads[tempId];
+        changed = true;
+      }
+    }
+    if (changed) await this.persistState();
+  }
+
+  async abort(tempId: string): Promise<void> {
+    const pending = this.settings.pendingUploads[tempId];
+    if (!pending) return;
+    this.assertTaskStorageIdentity(pending);
+    await this.abortRemote(pending);
+    delete this.settings.pendingUploads[tempId];
+    await this.persistState();
+  }
+
+  /**
+   * Manual cleanup only aborts old tasks proven to belong to this local journal.
+   * Prefix-scoped remote unknown uploads are reported, never destroyed.
+   */
   async cleanupOrphans(maxAgeMs: number = 24 * 3600 * 1000): Promise<number> {
+    this.lifecycle?.assertActive("清理孤儿分片");
+    // Validate scope before any management request. In particular, never turn a
+    // legacy leading-slash prefix into a different namespace by trimming it.
+    const prefix = normalizeObjectKeyPrefix(this.settings.objectKeyPrefix);
     const now = Date.now();
     let cleaned = 0;
-
-    // 1. 本地 pending 中 24h 未更新的
-    for (const [tempId, p] of Object.entries(this.settings.pendingUploads)) {
-      // 已完成对象不是孤儿分片，必须保留到引用提交成功。
-      if (p.phase === "uploaded") continue;
-      if (now - p.updatedAt > maxAgeMs) {
-        await this.abort(tempId);
-        cleaned++;
-      }
-    }
-
-    // 2. 服务端存在但本地无记录的孤儿（Initiated 时间 > maxAge）
-    try {
-      const remotes = await this.client.listMultipartUploads();
-      const localUploadIds = new Set(Object.values(this.settings.pendingUploads).map((p) => p.uploadId));
-      for (const r of remotes) {
-        if (localUploadIds.has(r.uploadId)) continue;
-        const initiatedMs = Date.parse(r.initiated);
-        if (Number.isFinite(initiatedMs) && now - initiatedMs > maxAgeMs) {
-          try {
-            await this.client.abortMultipart(r.key, r.uploadId);
-            cleaned++;
-          } catch (err) {
-            console.warn("[oss-upload] Abort 孤儿分片失败", r, err);
+    for (const pending of Object.values(this.settings.pendingUploads)) {
+      const phase = phaseOf(pending);
+      if (!pending.uploadId || phase === "staged" || phase === "uploaded" ||
+          phase === "reference_committing" || phase === "cleanup_pending") continue;
+      if (now - pending.updatedAt <= maxAgeMs) continue;
+      try {
+        this.assertTaskStorageIdentity(pending);
+        if (phase === "completing") {
+          // Complete may have succeeded even when its response was lost. HEAD is
+          // the only safe discriminator before touching the multipart session.
+          const exists = await this.client.headObject(pending.objectKey);
+          if (exists) {
+            await this.transition(pending, "uploaded");
+            continue;
           }
         }
+        await this.abortRemote(pending);
+        pending.uploadId = "";
+        pending.parts = [];
+        await this.transition(pending, "staged");
+        cleaned++;
+      } catch (error) {
+        console.warn("[oss-upload] 本地已知任务清理失败或完成状态不确定，journal 已保留", pending, error);
       }
-    } catch (err) {
-      // ListMultipartUploads 失败不影响本地清理
-      console.warn("[oss-upload] ListMultipartUploads 失败", err);
     }
 
-    if (cleaned > 0) new Notice(`已清理 ${cleaned} 个孤儿分片上传`);
+    let unknownRemoteCount = 0;
+    let listingFailed = false;
+    try {
+      const remotes = await this.client.listMultipartUploads(`${prefix}/`);
+      const localIds = new Set(Object.values(this.settings.pendingUploads).map((pending) => pending.uploadId));
+      unknownRemoteCount = remotes.filter((remote) => !localIds.has(remote.uploadId)).length;
+    } catch (error) {
+      listingFailed = true;
+      console.warn("[oss-upload] 无法读取前缀内 MultipartUpload，仅完成本地已知任务清理", error);
+    }
+
+    if (listingFailed) {
+      new Notice(`本地已知孤儿分片已清理 ${cleaned} 个；远端分片列表查询失败，请检查 ListMultipartUploads 权限或网络后重试`);
+    } else if (cleaned > 0 || unknownRemoteCount > 0) {
+      const unknown = unknownRemoteCount > 0 ? `；发现 ${unknownRemoteCount} 个远端未知任务，未自动中止` : "";
+      new Notice(`已清理 ${cleaned} 个本地已知孤儿分片${unknown}`);
+    } else {
+      new Notice("未发现可清理的本地已知分片，远端前缀下也没有未知分片任务");
+    }
     return cleaned;
+  }
+
+  private findResume(req: UploadRequest): PendingUpload | undefined {
+    if (req.tempId && this.settings.pendingUploads[req.tempId]) return this.settings.pendingUploads[req.tempId];
+    if (!req.localPath) return undefined;
+    return this.findPendingFor(req);
+  }
+
+  private assertResumeSource(pending: PendingUpload, req: UploadRequest): void {
+    const mtimeChanged = pending.sourceMtime !== undefined && req.sourceMtime !== undefined &&
+      pending.sourceMtime !== req.sourceMtime;
+    if (pending.size !== req.blob.size || pending.ext !== req.ext.toLowerCase() || mtimeChanged) {
+      throw new UploadSourceChangedError(pending.tempId);
+    }
+  }
+
+  private assertTaskStorageIdentity(pending: PendingUpload): void {
+    const identity = pending.storageIdentity;
+    if (!identity) throw new LegacyStorageIdentityError(pending.tempId);
+    if (!sameStorageIdentity(identity, currentStorageIdentity(this.settings))) {
+      throw new StorageIdentityMismatchError(pending.tempId);
+    }
+  }
+
+  private async ensureTaskStorageIdentity(
+    pending: PendingUpload,
+    beforeSend?: () => void,
+  ): Promise<void> {
+    if (pending.storageIdentity) {
+      this.assertTaskStorageIdentity(pending);
+      return;
+    }
+    const phase = phaseOf(pending);
+    if (phase === "staged" && !pending.uploadId && pending.parts.length === 0) {
+      pending.storageIdentity = currentStorageIdentity(this.settings);
+      pending.updatedAt = Date.now();
+      await this.persistState();
+      return;
+    }
+    if (phase === "uploaded" || phase === "reference_committing" || phase === "cleanup_pending" ||
+        phase === "completing") {
+      let exists = false;
+      try {
+        exists = await this.client.headObject(pending.objectKey, beforeSend);
+      } catch (error) {
+        if (error instanceof LifecycleQuiescedError || error instanceof AutoUploadPausedError) throw error;
+        throw new LegacyStorageIdentityError(pending.tempId);
+      }
+      if (!exists) throw new LegacyStorageIdentityError(pending.tempId);
+      pending.storageIdentity = currentStorageIdentity(this.settings);
+      if (phase === "completing") pending.phase = "uploaded";
+      pending.updatedAt = Date.now();
+      await this.persistState();
+      return;
+    }
+    // An UploadId cannot be safely probed across Buckets without already knowing
+    // which Bucket owns it. Never adopt a legacy uploading journal by assumption.
+    throw new LegacyStorageIdentityError(pending.tempId);
+  }
+
+  private assertAutomaticUploadEnabled(req: UploadRequest): void {
+    if (req.automatic && !this.settings.autoUpload) throw new AutoUploadPausedError();
+  }
+
+  private async transition(pending: PendingUpload, phase: UploadPhase): Promise<void> {
+    pending.phase = phase;
+    pending.updatedAt = Date.now();
+    await this.persistState();
+  }
+
+  private async confirmCompletedObject(
+    objectKey: string,
+    originalError: unknown,
+    beforeSend?: () => void,
+  ): Promise<boolean> {
+    try {
+      return await this.client.headObject(objectKey, beforeSend);
+    } catch (headError) {
+      if (!isRecoverableUploadError(originalError)) throw originalError;
+      throw headError;
+    }
+  }
+
+  private async abortAndForget(
+    pending: PendingUpload,
+    error: unknown,
+    beforeSend?: () => void,
+  ): Promise<void> {
+    console.error("[oss-upload] 不可恢复错误，触发 Abort", error);
+    this.assertTaskStorageIdentity(pending);
+    try {
+      await this.abortRemote(pending, beforeSend);
+    } catch (abortError) {
+      pending.updatedAt = Date.now();
+      await this.persistState().catch(() => undefined);
+      console.warn("[oss-upload] Abort 失败，journal 保留以供重试", abortError);
+      if (abortError instanceof LifecycleQuiescedError || abortError instanceof AutoUploadPausedError) {
+        throw new UploadPausedError(pending.tempId, abortError);
+      }
+      throw abortError;
+    }
+    delete this.settings.pendingUploads[pending.tempId];
+    await this.persistState();
+  }
+
+  private async abortRemote(pending: PendingUpload, beforeSend?: () => void): Promise<void> {
+    if (!pending.uploadId) return;
+    try {
+      await this.client.abortMultipart(pending.objectKey, pending.uploadId, beforeSend);
+    } catch (error) {
+      if (error instanceof OssError && error.status === 404 && error.code === "NoSuchUpload") return;
+      throw error;
+    }
+  }
+
+  private persistState(): Promise<void> {
+    const run = this.persistTail.then(() => this.persist());
+    this.persistTail = run.catch(() => undefined);
+    return run;
   }
 }
 
-/** 指数退避重试：最多 MAX_RETRIES 次，延迟 1s → 2s → 4s */
+function phaseOf(pending: PendingUpload): UploadPhase {
+  return pending.phase ?? "uploading";
+}
+
+function resultOf(pending: PendingUpload): UploadResult {
+  return { tempId: pending.tempId, objectKey: pending.objectKey };
+}
+
+function isCompleteConfirmation(
+  result: { key: string | null; requestId: string | null } | null | undefined,
+  expectedKey: string,
+): boolean {
+  return Boolean(result?.requestId && result.key === expectedKey);
+}
+
+function currentStorageIdentity(settings: PluginSettings): StorageIdentity {
+  const region = normalizeSigningRegion(settings.region);
+  return {
+    region,
+    bucketName: settings.bucketName.trim().toLowerCase(),
+    endpoint: normalizeOssEndpoint(settings.endpoint, region),
+    objectKeyPrefix: normalizeObjectKeyPrefix(settings.objectKeyPrefix),
+  };
+}
+
+function sameStorageIdentity(left: StorageIdentity, right: StorageIdentity): boolean {
+  return left.region === right.region &&
+    left.bucketName === right.bucketName &&
+    left.endpoint === right.endpoint &&
+    left.objectKeyPrefix === right.objectKeyPrefix;
+}
+
 async function withRetry<T>(
   fn: () => Promise<T>,
-  shouldRetry: (error: unknown) => boolean = () => true,
+  shouldRetry: (error: unknown) => boolean,
+  lifecycle?: LifecycleGate,
 ): Promise<T> {
-  let lastErr: unknown;
+  let lastError: unknown;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       return await fn();
-    } catch (err) {
-      lastErr = err;
-      if (!shouldRetry(err)) throw err;
+    } catch (error) {
+      lastError = error;
+      if (!shouldRetry(error)) throw error;
       if (attempt < MAX_RETRIES) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-        await sleep(delay);
+        await interruptibleSleep(BASE_DELAY_MS * Math.pow(2, attempt), lifecycle);
       }
     }
   }
-  throw lastErr;
+  throw lastError;
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function interruptibleSleep(ms: number, lifecycle?: LifecycleGate): Promise<void> {
+  if (!lifecycle) return sleep(ms);
+  let removeListener: () => void = () => undefined;
+  const quiesced = new Promise<void>((resolve) => {
+    removeListener = lifecycle.onQuiesce(resolve);
+  });
+  try {
+    await Promise.race([sleep(ms), quiesced]);
+  } finally {
+    removeListener();
+  }
 }
 
 function isRecoverableUploadError(error: unknown): boolean {
+  if (error instanceof AutoUploadPausedError || error instanceof LifecycleQuiescedError) return false;
   if (!(error instanceof OssError)) return true;
+  if (["RequestTimeout", "OperationAborted", "ServiceUnavailable", "InternalError"].includes(error.code)) return true;
   return error.status === 408 || error.status === 429 || error.status >= 500;
 }

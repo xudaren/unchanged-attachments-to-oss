@@ -1,11 +1,11 @@
-interface CacheEntry {
+export interface SignedUrlCacheEntry {
   url: string;
   expireAt: number;
 }
 
 /** 签名 URL 缓存：过期前 60 秒视为失效以避免边界抖动 */
 export class SignedUrlCache {
-  private readonly map = new Map<string, CacheEntry>();
+  private readonly map = new Map<string, SignedUrlCacheEntry>();
   private readonly maxSize: number;
   private readonly safetyMarginMs = 60 * 1000;
 
@@ -14,6 +14,10 @@ export class SignedUrlCache {
   }
 
   get(key: string): string | null {
+    return this.getEntry(key)?.url ?? null;
+  }
+
+  getEntry(key: string): SignedUrlCacheEntry | null {
     const e = this.map.get(key);
     if (!e) return null;
     if (Date.now() + this.safetyMarginMs >= e.expireAt) {
@@ -23,7 +27,7 @@ export class SignedUrlCache {
     // LRU touch
     this.map.delete(key);
     this.map.set(key, e);
-    return e.url;
+    return e;
   }
 
   set(key: string, url: string, expireAt: number): void {

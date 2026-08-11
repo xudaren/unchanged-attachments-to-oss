@@ -4,6 +4,7 @@ import {
   CredentialVerificationError,
   formatCredentialError,
   formatCredentialNotice,
+  OssError,
   parseOssErrorXml,
 } from "../../src/oss/errors";
 
@@ -49,6 +50,21 @@ test("formats invalid arguments with the rejected name and value", () => {
   assert.match(formatCredentialError(error, "bucket.example.com"), /请求参数错误.*max-keys=0/);
 });
 
+test("maps PublicEndpointForbidden to the current no-CNAME product boundary", () => {
+  const error = {
+    status: 400,
+    code: "PublicEndpointForbidden",
+    message: "Not allowed using the OSS public endpoint, please use CNAME instead",
+    requestId: "REQ-PUBLIC-ENDPOINT",
+  };
+  const formatted = formatCredentialError(error, "bucket.oss-cn-hangzhou.aliyuncs.com");
+
+  assert.match(formatted, /中国内地 Bucket 的默认公网 Endpoint/);
+  assert.match(formatted, /暂不支持 CNAME/);
+  assert.match(formatted, /首次配置时改用非中国内地 Region/);
+  assert.match(formatted, /REQ-PUBLIC-ENDPOINT/);
+});
+
 test("classifies connection, DNS, timeout and TLS errors", () => {
   const cases = [
     ["net::ERR_CONNECTION_CLOSED", "连接被关闭"],
@@ -76,4 +92,10 @@ test("formats the final unsaved OSS notice", () => {
     { status: 403, code: "AccessDenied", message: "denied", requestId: "REQ-OSS" },
   );
   assert.match(formatCredentialNotice(ossError), /^凭证校验失败，未保存：OSS 校验失败/);
+});
+
+test("keeps Error.message actionable when OSS returns an empty body", () => {
+  const error = new OssError(503, "", "PUT", "vault/file.pdf");
+  assert.match(error.message, /OSS PUT \/vault\/file\.pdf → 503: 未知错误/);
+  assert.equal(error.ossMessage, "");
 });

@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractReferenceKeys, isProtectedByAge, reconcileObjects } from "../../src/audit/reconcile";
+import { TFile } from "obsidian";
+import {
+  extractReferenceKeys,
+  isProtectedByAge,
+  reconcileObjects,
+  scanVaultReferences,
+  selectFinalDeletionCandidates,
+} from "../../src/audit/reconcile";
 import type { PendingUpload } from "../../src/types";
 
 test("extracts unique decoded object keys from repeated references", () => {
@@ -11,6 +18,60 @@ test("extracts unique decoded object keys from repeated references", () => {
   ].join("\n"));
 
   assert.deepEqual([...keys], ["vault/a.pdf", "vault/报告.pdf"]);
+});
+
+test("ignores uploading placeholders and Markdown examples inside code", () => {
+  const content = [
+    "![](oss:///uploading/task-id)",
+    "```md",
+    "![](oss:///vault/fake.png)",
+    "```",
+    "![](oss:///vault/real.png)",
+  ].join("\n");
+
+  assert.deepEqual([...extractReferenceKeys(content)], ["vault/real.png"]);
+});
+
+test("filters extracted references to selected object keys", () => {
+  const keys = extractReferenceKeys(
+    "![](oss://vault/a.pdf) ![](oss://vault/b.pdf)",
+    new Set(["vault/b.pdf"]),
+  );
+  assert.deepEqual([...keys], ["vault/b.pdf"]);
+});
+
+test("scans reference files with bounded concurrency and reports read failures", async () => {
+  const files = [
+    new TFile("a.md"),
+    new TFile("b.canvas"),
+    new TFile("c.base"),
+    new TFile("broken.md"),
+    new TFile("ignored.png"),
+  ];
+  let active = 0;
+  let peak = 0;
+  const progress: number[] = [];
+  const vault = {
+    getFiles: () => files,
+    cachedRead: async (file: TFile) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active--;
+      if (file.path === "broken.md") throw new Error("unreadable");
+      return `![](oss://vault/${file.extension}.pdf)`;
+    },
+  };
+
+  const result = await scanVaultReferences(vault as never, {
+    concurrency: 2,
+    onProgress: ({ scanned }) => progress.push(scanned),
+  });
+
+  assert.ok(peak <= 2);
+  assert.deepEqual([...result.referenced.keys()].sort(), ["vault/base.pdf", "vault/canvas.pdf", "vault/md.pdf"]);
+  assert.deepEqual(result.failedPaths, ["broken.md"]);
+  assert.equal(progress.at(-1), 4, "unsupported files are excluded from scan totals");
 });
 
 test("reconciles orphaned, missing, pending and internal objects by key", () => {
@@ -41,4 +102,28 @@ test("protects objects newer than 24 hours and unknown timestamps", () => {
   assert.equal(isProtectedByAge({ key: "a", size: 1, lastModified: "2026-08-07T00:00:01Z" }, now), true);
   assert.equal(isProtectedByAge({ key: "b", size: 1, lastModified: "2026-08-06T11:59:59Z" }, now), false);
   assert.equal(isProtectedByAge({ key: "c", size: 1, lastModified: "bad" }, now), true);
+});
+
+test("final deletion recheck skips restored references, pending and recently replaced objects", () => {
+  const now = Date.parse("2026-08-10T12:00:00Z");
+  const pending: PendingUpload = {
+    tempId: "task", objectKey: "vault/pending.pdf", uploadId: "upload", ext: "pdf", size: 1,
+    parts: [], sourcePath: "note.md", createdAt: 1, updatedAt: 1,
+  };
+  const result = selectFinalDeletionCandidates(
+    ["vault/old.pdf", "vault/restored.pdf", "vault/pending.pdf", "vault/replaced.pdf", "vault/missing.pdf"],
+    new Map([["vault/restored.pdf", ["note.md"]]]),
+    { task: pending },
+    [
+      { key: "vault/old.pdf", size: 1, lastModified: "2026-08-01T00:00:00Z" },
+      { key: "vault/restored.pdf", size: 1, lastModified: "2026-08-01T00:00:00Z" },
+      { key: "vault/pending.pdf", size: 1, lastModified: "2026-08-01T00:00:00Z" },
+      { key: "vault/replaced.pdf", size: 1, lastModified: "2026-08-10T11:59:00Z" },
+    ],
+    now,
+  );
+  assert.deepEqual(result.deletable, ["vault/old.pdf"]);
+  assert.deepEqual(result.skipped, [
+    "vault/restored.pdf", "vault/pending.pdf", "vault/replaced.pdf", "vault/missing.pdf",
+  ]);
 });

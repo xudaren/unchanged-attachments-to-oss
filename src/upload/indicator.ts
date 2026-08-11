@@ -33,10 +33,16 @@ export class AutoUploadIndicator {
 
 /** 拦截路径失败后回写本地的重试项 */
 export interface RetryEntry {
+  tempId?: string;
   mdPath: string;
   localPath: string;
   ext: string;
   occurrenceId?: string;
+}
+
+export interface RetryBatchResult {
+  succeeded: RetryEntry[];
+  failed: RetryEntry[];
 }
 
 /**
@@ -49,7 +55,7 @@ export class RetryIndicator {
 
   constructor(
     plugin: Plugin,
-    private readonly onRetry: (entries: RetryEntry[]) => Promise<void>,
+    private readonly onRetry: (entries: RetryEntry[]) => Promise<void | RetryBatchResult>,
     initialEntries: RetryEntry[] = [],
   ) {
     this.entries.push(...initialEntries);
@@ -63,7 +69,8 @@ export class RetryIndicator {
 
   /** 登记一条新的失败回写记录 */
   push(entry: RetryEntry): void {
-    this.entries.push(entry);
+    const key = retryKey(entry);
+    if (!this.entries.some((candidate) => retryKey(candidate) === key)) this.entries.push(entry);
     this.render();
   }
 
@@ -78,13 +85,27 @@ export class RetryIndicator {
     const snapshot = this.entries.splice(0, this.entries.length);
     this.render();
     try {
-      await this.onRetry(snapshot);
+      const result = await this.onRetry(snapshot);
+      if (result) this.entries.unshift(...result.failed);
+      this.dedupe();
+      this.render();
     } catch (err) {
       // 失败项回退到队列
       this.entries.unshift(...snapshot);
       this.render();
       new Notice(`重试失败：${(err as Error).message}`);
     }
+  }
+
+  private dedupe(): void {
+    const seen = new Set<string>();
+    const unique = this.entries.filter((entry) => {
+      const key = retryKey(entry);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    this.entries.splice(0, this.entries.length, ...unique);
   }
 
   private render(): void {
@@ -97,4 +118,8 @@ export class RetryIndicator {
     this.el.textContent = `⚠ 待重试 ${this.entries.length} · 点击`;
     this.el.setAttr("title", "点击重试上传失败并回写本地的附件");
   }
+}
+
+function retryKey(entry: RetryEntry): string {
+  return entry.tempId ?? `${entry.localPath}\0${entry.mdPath}\0${entry.occurrenceId ?? ""}`;
 }

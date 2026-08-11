@@ -1,46 +1,71 @@
-import { App, Modal, Notice, Plugin, Setting, TAbstractFile, TFile } from "obsidian";
-import { OssClient, OssError } from "../oss/client";
-import { OSS_URL_REGEX } from "../types";
+import { App, Modal, Notice, Plugin, Setting, TFile } from "obsidian";
+import { OssClient } from "../oss/client";
+import { scanOssReferences } from "../reference/codec";
+import { LifecycleGate, LifecycleQuiescedError } from "../lifecycle";
 
 /**
- * 删除联动监听：
- *  - 记录每个 md 文件当前引用的 oss:// key 集合
- *  - modify 后 debounce 1s，diff 出被移除的 key，弹 modal 让用户决定是否 DELETE OSS
- *  - 不跨文档判断引用，误删责任由用户承担（约束已声明）
+ * 删除入口控制器：只处理用户从插件菜单明确发起的破坏性操作。
+ * 不监听 Markdown 修改或原生文件删除，也不维护引用索引。
  */
 export class DeleteWatcher {
-  private readonly refs = new Map<string, Set<string>>();
-  private readonly timers = new Map<string, number>();
-  private readonly initializing = new Map<string, InitState>();
-  private readonly debounceMs = 1000;
   private registered = false;
 
   constructor(
     private readonly plugin: Plugin,
-    private readonly client: OssClient,
+    private client: OssClient,
+    private readonly lifecycle?: LifecycleGate,
   ) {}
 
-  async register(): Promise<void> {
+  setClient(client: OssClient): void {
+    this.client = client;
+  }
+
+  register(): void {
     if (this.registered) return;
     this.registered = true;
-    // 先监听再扫描，避免大型 Vault 冷启动期间出现事件空窗。
+    // 只增加显式文件菜单项；冷启动不读取 Markdown，也不监听文件内容或删除事件。
     this.plugin.registerEvent(
-      this.plugin.app.vault.on("create", (file) => this.onCreate(file)),
+      this.plugin.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") return;
+        menu.addSeparator();
+        menu.addItem((item) => item
+          .setTitle("删除文档并处理 OSS 附件")
+          .setIcon("trash-2")
+          .onClick(() => this.startAction(() => this.requestDocumentDeletion(file))));
+      }),
     );
-    this.plugin.registerEvent(
-      this.plugin.app.vault.on("modify", (file) => this.onModify(file)),
-    );
-    this.plugin.registerEvent(
-      this.plugin.app.vault.on("delete", (file) => this.onDelete(file)),
-    );
-    this.plugin.registerEvent(
-      this.plugin.app.vault.on("rename", (file, oldPath) => this.onRename(file, oldPath)),
-    );
-    this.plugin.register(() => this.dispose());
+  }
 
-    await Promise.allSettled(
-      this.plugin.app.vault.getMarkdownFiles().map((file) => this.initializeFile(file)),
+  async requestDocumentDeletion(file: TFile): Promise<void> {
+    this.lifecycle?.assertActive("打开文档删除入口");
+    let content: string;
+    try {
+      content = await this.plugin.app.vault.cachedRead(file);
+    } catch (error) {
+      console.warn("[oss] 删除前读取文档失败", file.path, error);
+      new Notice("无法读取文档，未执行删除");
+      return;
+    }
+    const keys = collectDocumentOssKeys(content);
+    if (keys.length === 0) {
+      this.lifecycle?.assertActive("确认删除文档");
+      const confirmed = await this.waitForCoreDeletionPrompt(file);
+      if (confirmed) await this.trashDocumentThenDeleteSelected(file, []);
+      return;
+    }
+    this.lifecycle?.assertActive("展示文档删除确认");
+    let removeQuiesceListener: () => void = () => undefined;
+    const modal = new ConfirmDocumentDeletionModal(
+      this.plugin.app,
+      file.path,
+      keys,
+      async (selected) => this.lifecycle
+        ? this.lifecycle.run(() => this.trashDocumentThenDeleteSelected(file, selected))
+        : this.trashDocumentThenDeleteSelected(file, selected),
+      () => removeQuiesceListener(),
     );
+    modal.open();
+    removeQuiesceListener = this.lifecycle?.onQuiesce(() => modal.close()) ?? (() => undefined);
   }
 
   confirmReferenceRemoval(
@@ -49,11 +74,12 @@ export class DeleteWatcher {
     label: string,
     removeLocalReference: () => Promise<boolean>,
   ): void {
+    this.lifecycle?.assertActive("展示附件删除确认");
     const commitReferenceRemoval = async (remoteDeleted: boolean): Promise<void> => {
       try {
+        this.lifecycle?.assertActive("移除附件引用");
         const removed = await removeLocalReference();
         if (removed) {
-          this.refs.get(mdPath)?.delete(normalizeKey(key));
           new Notice(remoteDeleted
             ? `已删除 OSS 对象并移除${label}引用`
             : `已移除${label}引用，OSS 对象已保留`);
@@ -69,144 +95,73 @@ export class DeleteWatcher {
           : "本文档引用移除失败，OSS 对象已保留");
       }
     };
-    new ConfirmReferenceRemovalModal(this.plugin.app, key, mdPath, label, async () => {
-      await commitReferenceRemoval(false);
+    let removeQuiesceListener: () => void = () => undefined;
+    const modal = new ConfirmReferenceRemovalModal(this.plugin.app, key, mdPath, label, async () => {
+      await this.runActionAsync(() => commitReferenceRemoval(false));
     }, async () => {
-      const deleted = await deleteRemoteObject(this.client, key);
-      if (!deleted) {
-        new Notice("OSS 删除失败，本文档引用已保留，可稍后重试");
-        return;
-      }
-      await commitReferenceRemoval(true);
-    }).open();
-  }
-
-  private dispose(): void {
-    for (const timer of this.timers.values()) window.clearTimeout(timer);
-    this.timers.clear();
-    this.initializing.clear();
-    this.refs.clear();
-  }
-
-  private onCreate(file: TAbstractFile): void {
-    if (!(file instanceof TFile) || file.extension !== "md") return;
-    void this.initializeFile(file);
-  }
-
-  private onModify(file: TAbstractFile): void {
-    if (!(file instanceof TFile) || file.extension !== "md") return;
-    const init = this.initializing.get(file.path);
-    if (init) {
-      init.dirty = true;
-      return;
-    }
-    this.scheduleDiff(file);
-  }
-
-  private scheduleDiff(file: TFile): void {
-    const existing = this.timers.get(file.path);
-    if (existing !== undefined) window.clearTimeout(existing);
-    const t = window.setTimeout(() => this.diffAndPrompt(file), this.debounceMs);
-    this.timers.set(file.path, t);
-  }
-
-  private onDelete(file: TAbstractFile): void {
-    if (!(file instanceof TFile) || file.extension !== "md") return;
-    this.cancelTimer(file.path);
-    const init = this.initializing.get(file.path);
-    if (init) init.deleted = true;
-    const prev = this.refs.get(file.path);
-    this.refs.delete(file.path);
-    if (!prev || prev.size === 0) return;
-    // 整篇被删 → 引用的所有 key 都视为被移除
-    this.promptDelete(Array.from(prev), file.path, "文档被删除", false);
-  }
-
-  private onRename(file: TAbstractFile, oldPath: string): void {
-    const prev = this.refs.get(oldPath);
-    this.refs.delete(oldPath);
-    if (prev && file instanceof TFile && file.extension === "md") {
-      this.refs.set(file.path, prev);
-    }
-    const init = this.initializing.get(oldPath);
-    if (init && file instanceof TFile && file.extension === "md") {
-      this.initializing.delete(oldPath);
-      init.path = file.path;
-      this.initializing.set(file.path, init);
-    }
-    const hadTimer = this.cancelTimer(oldPath);
-    if (hadTimer && file instanceof TFile && file.extension === "md") this.scheduleDiff(file);
-  }
-
-  private async diffAndPrompt(file: TFile): Promise<void> {
-    this.timers.delete(file.path);
-    let content: string;
-    try {
-      content = await this.plugin.app.vault.cachedRead(file);
-    } catch {
-      return;
-    }
-    const now = collectKeys(content);
-    const prev = this.refs.get(file.path) ?? new Set();
-    this.refs.set(file.path, now);
-    const removed: string[] = [];
-    for (const k of prev) if (!now.has(k)) removed.push(k);
-    if (removed.length === 0) return;
-    this.promptDelete(removed, file.path, "引用被移除", true);
-  }
-
-  private async initializeFile(file: TFile): Promise<void> {
-    if (this.initializing.has(file.path)) return;
-    const state: InitState = { file, path: file.path, dirty: false, deleted: false };
-    this.initializing.set(state.path, state);
-    try {
-      // cachedRead 在调用时取得基线；期间事件由 state 暂存，基线完成后再 diff。
-      const content = await this.plugin.app.vault.cachedRead(file);
-      const baseline = collectKeys(content);
-      if (state.deleted) {
-        if (baseline.size > 0) this.promptDelete(Array.from(baseline), state.path, "文档被删除", false);
-        return;
-      }
-      this.refs.set(state.path, baseline);
-      if (state.dirty) this.scheduleDiff(file);
-    } catch {
-      // 单文件读取失败不阻塞其他文档；后续 modify 会重新建立当前基线。
-    } finally {
-      if (this.initializing.get(state.path) === state) this.initializing.delete(state.path);
-    }
-  }
-
-  private cancelTimer(path: string): boolean {
-    const timer = this.timers.get(path);
-    if (timer === undefined) return false;
-    window.clearTimeout(timer);
-    this.timers.delete(path);
-    return true;
-  }
-
-  private promptDelete(keys: string[], mdPath: string, reason: string, defaultSelected: boolean): void {
-    // 过滤掉占位符（uploading/*），只处理真实 objectKey
-    const real = keys.filter((k) => !k.startsWith("uploading/"));
-    if (real.length === 0) return;
-    new ConfirmDeleteModal(this.plugin.app, real, mdPath, reason, defaultSelected, async (chosen) => {
-      let ok = 0;
-      let fail = 0;
-      for (const key of chosen) {
-        try {
-          await this.client.deleteObject(key);
-          ok++;
-        } catch (err) {
-          if (err instanceof OssError && err.status === 404) {
-            ok++;
-          } else {
-            fail++;
-            console.warn("[oss] 删除远端失败", key, err);
-          }
+      await this.runActionAsync(async () => {
+        this.lifecycle?.assertActive("删除 OSS 对象");
+        const deleted = await deleteRemoteObject(this.client, key);
+        if (!deleted) {
+          new Notice("OSS 删除失败，本文档引用已保留，可稍后重试");
+          return;
         }
+        await commitReferenceRemoval(true);
+      });
+    }, () => removeQuiesceListener());
+    modal.open();
+    removeQuiesceListener = this.lifecycle?.onQuiesce(() => modal.close()) ?? (() => undefined);
+  }
+
+  private async trashDocumentThenDeleteSelected(file: TFile, selected: string[]): Promise<void> {
+    try {
+      this.lifecycle?.assertActive("将文档移入回收位置");
+      await this.plugin.app.fileManager.trashFile(file);
+    } catch (error) {
+      console.warn("[oss] 文档移入回收位置失败", file.path, error);
+      new Notice("文档删除失败，OSS 对象未处理");
+      return;
+    }
+    let deleted = 0;
+    let failed = 0;
+    for (const key of selected) {
+      this.lifecycle?.assertActive("删除 OSS 对象");
+      if (await deleteRemoteObject(this.client, key)) deleted++;
+      else failed++;
+    }
+    if (selected.length === 0) new Notice("文档已移入回收位置，OSS 对象已保留");
+    else new Notice(`文档已移入回收位置；OSS 删除 ${deleted} 个${failed > 0 ? `，失败 ${failed} 个` : ""}`);
+  }
+
+  private startAction(factory: () => Promise<void>): void {
+    void this.runActionAsync(factory);
+  }
+
+  private async runActionAsync(factory: () => Promise<void>): Promise<void> {
+    try {
+      if (this.lifecycle) await this.lifecycle.run(factory);
+      else await factory();
+    } catch (error) {
+      if (!(error instanceof LifecycleQuiescedError)) {
+        console.warn("[oss] 删除操作失败", error);
       }
-      if (ok > 0) new Notice(`已删除 OSS 对象 ${ok} 个${fail > 0 ? `，失败 ${fail} 个` : ""}`);
-      else if (fail > 0) new Notice(`删除失败 ${fail} 个，见控制台`);
-    }).open();
+    }
+  }
+
+  private async waitForCoreDeletionPrompt(file: TFile): Promise<boolean> {
+    if (!this.lifecycle) return this.plugin.app.fileManager.promptForDeletion(file);
+    let cancel!: () => void;
+    const quiesced = new Promise<boolean>((resolve) => {
+      cancel = this.lifecycle!.onQuiesce(() => resolve(false));
+    });
+    try {
+      return await Promise.race([
+        this.plugin.app.fileManager.promptForDeletion(file),
+        quiesced,
+      ]);
+    } finally {
+      cancel();
+    }
   }
 }
 
@@ -215,33 +170,21 @@ export async function deleteRemoteObject(client: OssClient, key: string): Promis
     await client.deleteObject(key);
     return true;
   } catch (err) {
-    if (err instanceof OssError && err.status === 404) return true;
     console.warn("[oss] 删除远端失败", key, err);
     return false;
   }
 }
 
-interface InitState {
-  file: TFile;
-  path: string;
-  dirty: boolean;
-  deleted: boolean;
-}
-
 function collectKeys(md: string): Set<string> {
-  const out = new Set<string>();
-  const re = new RegExp(OSS_URL_REGEX.source, "g");
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(md)) !== null) out.add(normalizeKey(m[1]));
-  return out;
+  return new Set(
+    scanOssReferences(md)
+      .map((reference) => reference.key)
+      .filter((key) => !key.startsWith("uploading/")),
+  );
 }
 
-function normalizeKey(value: string): string {
-  try {
-    return decodeURIComponent(value.replace(/^\/+/, ""));
-  } catch {
-    return value.replace(/^\/+/, "");
-  }
+export function collectDocumentOssKeys(md: string): string[] {
+  return Array.from(collectKeys(md));
 }
 
 class ConfirmReferenceRemovalModal extends Modal {
@@ -252,6 +195,7 @@ class ConfirmReferenceRemovalModal extends Modal {
     private readonly label: string,
     private readonly onKeepRemote: () => Promise<void>,
     private readonly onConfirm: () => Promise<void>,
+    private readonly onClosed?: () => void,
   ) {
     super(app);
   }
@@ -278,16 +222,20 @@ class ConfirmReferenceRemovalModal extends Modal {
           await this.onConfirm();
         }));
   }
+
+  onClose(): void {
+    this.onClosed?.();
+    this.contentEl.empty();
+  }
 }
 
-class ConfirmDeleteModal extends Modal {
+class ConfirmDocumentDeletionModal extends Modal {
   constructor(
     app: App,
-    private readonly keys: string[],
     private readonly mdPath: string,
-    private readonly reason: string,
-    private readonly defaultSelected: boolean,
+    private readonly keys: string[],
     private readonly onConfirm: (chosen: string[]) => Promise<void>,
+    private readonly onClosed?: () => void,
   ) {
     super(app);
   }
@@ -295,10 +243,13 @@ class ConfirmDeleteModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h3", { text: "联动删除 OSS 附件？" });
-    contentEl.createEl("p", { text: `${this.mdPath} · ${this.reason}` });
+    contentEl.createEl("h3", { text: "删除文档并处理 OSS 附件？" });
+    contentEl.createEl("p", { text: this.mdPath });
+    contentEl.createEl("p", {
+      text: "文档将先移入 Obsidian 配置的回收位置。以下 OSS 对象默认保留；只勾选需要永久删除的对象。",
+    });
 
-    const selected = new Set(this.defaultSelected ? this.keys : []);
+    const selected = new Set<string>();
     const listEl = contentEl.createDiv({ cls: "oss-delete-list" });
     listEl.style.maxHeight = "260px";
     listEl.style.overflow = "auto";
@@ -307,7 +258,7 @@ class ConfirmDeleteModal extends Modal {
       new Setting(listEl)
         .setName(key)
         .addToggle((t) =>
-          t.setValue(this.defaultSelected).onChange((v) => {
+          t.setValue(false).onChange((v) => {
             if (v) selected.add(key);
             else selected.delete(key);
           }),
@@ -316,16 +267,21 @@ class ConfirmDeleteModal extends Modal {
 
     new Setting(contentEl)
       .addButton((b) =>
-        b.setButtonText("保留全部").onClick(() => this.close()),
+        b.setButtonText("取消").onClick(() => this.close()),
       )
       .addButton((b) =>
         b
-          .setButtonText("确认删除")
-          .setCta()
+          .setButtonText("删除文档")
+          .setWarning()
           .onClick(async () => {
             this.close();
             await this.onConfirm(Array.from(selected));
           }),
       );
+  }
+
+  onClose(): void {
+    this.onClosed?.();
+    this.contentEl.empty();
   }
 }

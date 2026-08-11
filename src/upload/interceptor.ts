@@ -4,188 +4,537 @@ import {
   Notice,
   Plugin,
   TFile,
+  TFolder,
   Vault,
 } from "obsidian";
-import { UploadManager, UploadPausedError } from "./manager";
-import { UploadProgressBar } from "./progress";
-import { RetryEntry, RetryIndicator } from "./indicator";
-import { isSupportedExt, PluginSettings } from "../types";
+import { formatOssReference } from "../reference/codec";
+import { LifecycleGate, LifecycleQuiescedError } from "../lifecycle";
+import { PendingReferenceLocator, PendingUpload, PluginSettings, isSupportedExt } from "../types";
+import { RetryBatchResult, RetryEntry, RetryIndicator } from "./indicator";
 import {
+  AttachmentOccurrence,
   findResolvedAttachmentOccurrences,
+  hasOssReference,
   replaceOneResolvedAttachmentReference,
+  replaceUploadingPlaceholder,
+  ResolvedAttachmentBacklinkCache,
+  StableOccurrenceResult,
+  waitForStableAttachmentOccurrences,
 } from "./links";
+import {
+  AutoUploadPausedError,
+  isLifecycleUploadPause,
+  UploadManager,
+  UploadPausedError,
+} from "./manager";
+import { UploadProgressBar } from "./progress";
 
-/**
- * 附件拦截器：
- *  - editor-paste / editor-drop：blob 直传，成功后插入 ![](oss://key)，不落本地
- *  - vault.on('create')：兜底路径，上传成功后 replace 引用 + vault.delete
- *  - 拦截路径失败：把 blob 写回本地文件、移除占位链接（不丢数据），并登记待重试
- */
+export const STAGING_DIR = ".oss-plugin-staging";
+const MOBILE_IN_MEMORY_LIMIT = 128 * 1024 * 1024;
+
+interface PreparedInput {
+  file: File;
+  tempId: string;
+  placeholder: string;
+  sourcePath: string;
+  locator: PendingReferenceLocator;
+}
+
+interface StagedInput extends PreparedInput {
+  name: string;
+  type: string;
+  ext: string;
+  size: number;
+  /** Stable in-memory snapshot for this run; staging is the crash-recovery copy. */
+  blob: Blob;
+  stagingPath: string;
+  sourceMtime?: number;
+}
+
+class InputDurabilityError extends Error {
+  constructor(
+    public readonly input: StagedInput,
+    public readonly originalError: unknown,
+  ) {
+    super(`无法持久化输入附件：${errorMessage(originalError)}`);
+    this.name = "InputDurabilityError";
+  }
+}
+
+/** Owns input staging, upload scheduling, reference commit and local cleanup. */
 export class AttachmentInterceptor {
+  private editorEventsRegistered = false;
+  private fallbackRegistered = false;
+  private disposed = false;
+  private readonly backlinks: ResolvedAttachmentBacklinkCache;
+  private readonly suppressedLocalPaths = new Set<string>();
+  private stagingFolderReady: Promise<void> | null = null;
+  private metadataResolutionTracking = false;
+  private fallbackTail: Promise<void> = Promise.resolve();
+  private stagingRecovery: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly plugin: Plugin,
     private readonly manager: UploadManager,
     private readonly settings: PluginSettings,
     private readonly progress?: UploadProgressBar,
     private readonly retryIndicator?: RetryIndicator,
-  ) {}
-
-  register(): void {
-    this.plugin.registerEvent(
-      this.plugin.app.workspace.on("editor-paste", (evt, editor, view) => {
-        if (view instanceof MarkdownView) void this.handlePaste(evt, editor, view);
-      }),
-    );
-    this.plugin.registerEvent(
-      this.plugin.app.workspace.on("editor-drop", (evt, editor, view) => {
-        if (view instanceof MarkdownView) void this.handleDrop(evt, editor, view);
-      }),
-    );
-    this.plugin.registerEvent(
-      this.plugin.app.vault.on("create", (file) => {
-        void this.handleCreate(file as TFile);
-      }),
-    );
+    private readonly lifecycle?: LifecycleGate,
+  ) {
+    this.backlinks = new ResolvedAttachmentBacklinkCache(plugin.app.metadataCache);
   }
 
-  private async handlePaste(evt: ClipboardEvent, editor: Editor, view: MarkdownView) {
+  registerEditorEvents(): void {
+    if (this.editorEventsRegistered) return;
+    this.editorEventsRegistered = true;
+    this.metadataResolutionTracking = true;
+    this.plugin.registerEvent(this.plugin.app.workspace.on("editor-paste", (event, editor, view) => {
+      if (view instanceof MarkdownView) {
+        this.startRoot(() => this.handlePaste(event, editor, view), "粘贴附件");
+      }
+    }));
+    this.plugin.registerEvent(this.plugin.app.workspace.on("editor-drop", (event, editor, view) => {
+      if (view instanceof MarkdownView) {
+        this.startRoot(() => this.handleDrop(event, editor, view), "拖入附件");
+      }
+    }));
+    this.plugin.registerEvent(this.plugin.app.metadataCache.on("resolved", () => this.backlinks.markResolved()));
+    this.plugin.registerEvent(this.plugin.app.vault.on("rename", () => this.backlinks.invalidate()));
+    this.plugin.registerEvent(this.plugin.app.vault.on("delete", () => this.backlinks.invalidate()));
+    this.plugin.register(() => { this.disposed = true; });
+    const recovery = this.lifecycle
+      ? this.lifecycle.run(() => this.recoverUnjournaledStaging())
+      : this.recoverUnjournaledStaging();
+    this.stagingRecovery = recovery.then(() => undefined, (error) => {
+      if (error instanceof LifecycleQuiescedError) return;
+      console.error("[oss] 启动恢复裸 staging 失败", error);
+      new Notice("检测到未登记的 staging，但自动恢复失败；文件仍保留在隐藏 staging 目录");
+    });
+  }
+
+  registerCreateFallback(): void {
+    if (this.fallbackRegistered || this.disposed) return;
+    this.fallbackRegistered = true;
+    this.plugin.registerEvent(this.plugin.app.vault.on("create", (file) => {
+      const factory = () => {
+        const run = this.fallbackTail.then(() => {
+          this.lifecycle?.assertActive("处理新落地附件");
+          return this.handleCreate(file as TFile);
+        });
+        return run;
+      };
+      const run = this.lifecycle ? this.lifecycle.run(factory) : factory();
+      this.fallbackTail = run.catch((error) => {
+        if (error instanceof LifecycleQuiescedError) return;
+        console.error("[oss] create 兜底失败", error);
+        new Notice(`附件自动上传失败，已保留本地：${errorMessage(error)}`);
+      });
+    }));
+  }
+
+  private async handlePaste(event: ClipboardEvent, editor: Editor, view: MarkdownView): Promise<void> {
     if (!this.settings.autoUpload) return;
-    const files = clipboardFiles(evt);
-    const supported = files.filter((f) => isSupportedExt(extOf(f.name, f.type)));
-    if (supported.length === 0) return;
-    if (supported.length !== files.length || hasClipboardText(evt)) return;
-    // Start every read before the clipboard event returns; OS-backed File handles
-    // can be revoked while multipart upload is awaiting the network.
-    const captures = supported.map(captureAttachment);
-    evt.preventDefault();
-    await this.uploadCaptured(captures, editor, view);
+    const files = clipboardFiles(event);
+    if (!this.canTakeOver(files)) return;
+    if (shouldKeepLocalOnThisDevice(files)) {
+      new Notice("本批附件超过移动端安全内存上限，已交给 Obsidian 本地保存，不会自动发起网络上传");
+      return;
+    }
+    await this.takeOverInput(files, event, editor, view);
   }
 
-  private async handleDrop(evt: DragEvent, editor: Editor, view: MarkdownView) {
+  private async handleDrop(event: DragEvent, editor: Editor, view: MarkdownView): Promise<void> {
     if (!this.settings.autoUpload) return;
-    const files = Array.from(evt.dataTransfer?.files ?? []);
-    const supported = files.filter((f) => isSupportedExt(extOf(f.name, f.type)));
-    if (supported.length === 0) return;
-    if (supported.length !== files.length) return;
-    const captures = supported.map(captureAttachment);
-    evt.preventDefault();
-    await this.uploadCaptured(captures, editor, view);
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (!this.canTakeOver(files)) return;
+    if (shouldKeepLocalOnThisDevice(files)) {
+      new Notice("本批附件超过移动端安全内存上限，已交给 Obsidian 本地保存，不会自动发起网络上传");
+      return;
+    }
+    await this.takeOverInput(files, event, editor, view);
   }
 
-  private async uploadCaptured(
-    captures: Array<Promise<CapturedAttachment>>,
+  private canTakeOver(files: File[]): boolean {
+    return files.length > 0 && files.every((file) => isSupportedExt(extOf(file.name, file.type)));
+  }
+
+  private async takeOverInput(
+    files: File[],
+    event: ClipboardEvent | DragEvent,
     editor: Editor,
     view: MarkdownView,
   ): Promise<void> {
-    const results = await Promise.allSettled(captures);
-    for (const result of results) {
-      if (result.status === "rejected") {
-        console.error("[oss] 无法快照输入附件", result.reason);
-        new Notice(formatInputReadError(result.reason));
+    const sourcePath = view.file?.path ?? "";
+    const prepared: PreparedInput[] = files.map((file) => {
+      const tempId = crypto.randomUUID();
+      return {
+        file,
+        tempId,
+        sourcePath,
+        placeholder: `![上传中 ${file.name}](oss://uploading/${tempId})`,
+        locator: undefined as never,
+      };
+    });
+
+    // Start every OS-backed File read before returning control to the event source.
+    const stagingPromises = prepared.map((input) => this.captureAndStage(input));
+    insertAllPlaceholders(editor, prepared);
+    event.preventDefault();
+
+    const staged = await Promise.allSettled(stagingPromises);
+    const ready: StagedInput[] = [];
+    // Byte safety is part of the admitted paste/drop operation. Even when the
+    // plugin starts quiescing, a captured Blob whose staging/journal failed must
+    // still be copied to an ordinary Vault attachment before this root drains.
+    for (let index = 0; index < staged.length; index++) {
+      const result = staged[index];
+      const input = prepared[index];
+      if (result.status === "fulfilled") {
+        ready.push(result.value);
         continue;
       }
-      await this.uploadAndInsert(result.value, editor, view);
+      console.error("[oss] 无法持久化输入附件", result.reason);
+      if (result.reason instanceof InputDurabilityError) {
+        await this.preserveCapturedAfterDurabilityFailure(
+          result.reason.input,
+          editor,
+          view,
+          result.reason.originalError,
+        );
+      } else if (!this.lifecycle || this.lifecycle.isActive) {
+        replaceExactInEditor(editor, input.placeholder, formatInputReadFailureMarker(input.file.name));
+        new Notice(formatInputReadError(result.reason));
+      }
+    }
+    // Quiescing still lets every already-captured File reach staging+journal,
+    // but no upload, reference write or deletion may follow.
+    this.lifecycle?.assertActive("继续处理已持久化附件");
+    // Upload one staged file at a time: direct input is already durable, and this
+    // keeps mobile/network memory bounded to one attachment plus one 4 MB part.
+    for (const input of ready) {
+      await this.uploadStagedInput(input, editor, view);
     }
   }
 
-  /** 拦截路径：blob → OSS → 插入占位 → 成功替换 / 失败回写本地 */
-  private async uploadAndInsert(file: CapturedAttachment, editor: Editor, view: MarkdownView): Promise<void> {
-    const ext = extOf(file.name, file.type);
-    const sourcePath = view.file?.path ?? "";
-    const occurrenceId = crypto.randomUUID();
-    const placeholder = `![上传中 ${file.name}](oss://uploading/${occurrenceId})`;
-    const insertPos = editor.getCursor();
-    editor.replaceRange(placeholder, insertPos);
-    const notice = new Notice(`上传中：${file.name} (${formatSize(file.size)})`, 0);
-    let taskTempId: string | undefined;
-
+  private async captureAndStage(input: PreparedInput): Promise<StagedInput> {
+    const captured = await captureAttachment(input.file);
+    // Startup recovery must finish before a new .stage file can appear, or it
+    // could mistake the byte-first journal window for a crash orphan.
+    await this.stagingRecovery;
+    const ext = extOf(captured.name, captured.type);
+    const stagingPath = `${STAGING_DIR}/${input.tempId}.${ext}.stage`;
+    const stagedInput: StagedInput = { ...input, ...captured, ext, stagingPath };
     try {
-      const { objectKey, tempId } = await this.manager.upload({
-        blob: file.blob,
+      // Byte safety comes first. A journal must never make a captured File look
+      // durable before its stable Vault copy actually exists.
+      await this.ensureStagingFolder();
+      const stagingFile = await this.plugin.app.vault.createBinary(
+        stagingPath,
+        await captured.blob.arrayBuffer(),
+      );
+      stagedInput.sourceMtime = stagingFile.stat.mtime;
+    } catch (error) {
+      throw new InputDurabilityError(stagedInput, error);
+    }
+    try {
+      await this.manager.prepareStagedTask({
+        tempId: input.tempId,
         ext,
-        sourcePath,
-        occurrenceId,
+        size: captured.size,
+        sourcePath: input.sourcePath,
+        localPath: stagingPath,
+        stagingPath,
+        displayName: captured.name,
+        occurrenceId: input.tempId,
+        locator: input.locator,
+        sourceMtime: stagedInput.sourceMtime,
+      });
+    } catch (error) {
+      throw new InputDurabilityError(stagedInput, error);
+    }
+    return stagedInput;
+  }
+
+  private async uploadStagedInput(input: StagedInput, editor: Editor, view: MarkdownView): Promise<void> {
+    const notice = new Notice(`上传中：${input.name} (${formatSize(input.size)})`, 0);
+    let tempId = input.tempId;
+    let uploadedObjectKey: string | null = null;
+    try {
+      const uploaded = await this.manager.upload({
+        blob: input.blob,
+        ext: input.ext,
+        sourcePath: input.sourcePath,
+        localPath: input.stagingPath,
+        stagingPath: input.stagingPath,
+        tempId: input.tempId,
+        displayName: input.name,
+        occurrenceId: input.tempId,
+        locator: input.locator,
+        sourceMtime: input.sourceMtime,
+        automatic: true,
         onProgress: (done, total) => {
-          this.progress?.begin(file.name, total);
+          this.progress?.begin(input.name, total);
           this.progress?.advance(done);
         },
       });
-      taskTempId = tempId;
-      this.progress?.finish();
-      const finalLink = `![${escapeAlt(file.name)}](oss://${objectKey})`;
-      if (!replaceInEditor(editor, placeholder, finalLink)) {
-        throw new Error("上传已完成，但上传占位符已被修改或删除");
+      tempId = uploaded.tempId;
+      uploadedObjectKey = uploaded.objectKey;
+      this.lifecycle?.assertActive("修改附件引用");
+      await this.manager.markReferenceCommitting(tempId);
+      const finalReference = formatOssReference(uploaded.objectKey, input.name);
+      this.lifecycle?.assertActive("修改附件引用");
+      let committed = view.file?.path === input.sourcePath &&
+        replaceExactInEditor(editor, input.placeholder, finalReference);
+      if (committed) {
+        if (view.file?.path === input.sourcePath) {
+          await view.save();
+          committed = await sourceContainsObject(
+            this.plugin.app.vault,
+            input.sourcePath,
+            uploaded.objectKey,
+          );
+        } else {
+          committed = false;
+        }
       }
-      await this.manager.finalize(tempId);
-      notice.setMessage(`已上传：${file.name}`);
+      if (!committed) {
+        committed = await replaceUploadingPlaceholder(
+          this.plugin.app.vault,
+          input.sourcePath,
+          input.locator,
+          uploaded.objectKey,
+          input.name,
+          () => this.lifecycle?.assertActive("修改附件引用"),
+        );
+      }
+      if (!committed) throw new Error("上传已完成，但唯一占位符已被修改或删除；staging 已保留");
+      await this.manager.markCleanupPending(tempId);
+      this.lifecycle?.assertActive("删除本地 staging");
+      await this.deleteLocalFile(input.stagingPath, input.size, input.sourceMtime);
+      await this.manager.finalizeCleanupForPath(input.stagingPath);
+      this.progress?.finish();
+      notice.setMessage(`已上传：${input.name}`);
       setTimeout(() => notice.hide(), 2000);
-    } catch (err) {
+    } catch (error) {
       this.progress?.finish();
-      console.error("[oss] 拦截路径上传失败，回写本地", err);
       notice.hide();
-      // 失败兜底：移除占位，写入本地，登记待重试
-      replaceInEditor(editor, placeholder, "");
-      const localPath = await writeLocalAttachment(this.plugin.app.vault, view.file, file.name, file.blob);
-      if (localPath) {
-        const pendingTempId = err instanceof UploadPausedError ? err.tempId : taskTempId;
-        if (pendingTempId) await this.manager.bindLocalPath(pendingTempId, localPath);
-        editor.replaceRange(`![[${localPath}]]`, insertPos);
-        this.retryIndicator?.push({
-          mdPath: sourcePath,
-          localPath,
-          ext,
-          occurrenceId,
-        });
-        new Notice(`上传失败，已回写本地：${localPath}（可在状态栏点击重试）`);
-      } else {
-        new Notice(`上传失败，且本地回写也失败：${(err as Error).message}`);
+      console.error("[oss] 直传任务失败", error);
+      if (error instanceof UploadPausedError && error.reason instanceof AutoUploadPausedError) {
+        const paused = this.manager.getPending(tempId);
+        if (paused) this.retryIndicator?.push(retryEntryFor(paused));
+        new Notice(`自动上传已暂停，staging 与续传进度已保留：${input.name}`);
+        return;
       }
+      if (isLifecycleUploadPause(error)) {
+        const paused = this.manager.getPending(tempId);
+        if (paused) this.retryIndicator?.push(retryEntryFor(paused));
+        return;
+      }
+      if (uploadedObjectKey && await sourceContainsObject(
+        this.plugin.app.vault,
+        input.sourcePath,
+        uploadedObjectKey,
+      ).catch(() => false)) {
+        const committedPending = this.manager.getPending(tempId);
+        if (committedPending) this.retryIndicator?.push(retryEntryFor(committedPending));
+        new Notice(`附件引用已安全提交；任务日志或 staging 清理将在下次重试：${input.name}`);
+        return;
+      }
+      const pending = this.manager.getPending(tempId);
+      if (pending?.phase === "reference_committing" || pending?.phase === "cleanup_pending" ||
+          pending?.phase === "uploaded") {
+        this.retryIndicator?.push(retryEntryFor(pending));
+        new Notice(`OSS 对象已保留，引用或本地清理待重试：${input.name}`);
+        return;
+      }
+      await this.promoteStagingAfterFailure(input, editor, view, error);
     }
   }
 
-  /** 兜底路径：Obsidian 自己写入本地了才走这里 */
-  private async handleCreate(file: TFile): Promise<void> {
-    if (!this.settings.autoUpload) return;
-    if (!(file instanceof TFile)) return;
-    if (!isSupportedExt(file.extension)) return;
-    if (isInPendingObjectKey(file.path, this.settings)) return; // 避免误处理插件内部产物
-
-    const occurrences = await waitForOccurrences(this.plugin, file);
-    if (occurrences.length === 0) return;
-
-    const notice = new Notice(`兜底上传：${file.name}`, 0);
-    let blob: Blob;
+  private async promoteStagingAfterFailure(
+    input: StagedInput,
+    editor: Editor,
+    view: MarkdownView,
+    uploadError: unknown,
+  ): Promise<void> {
+    this.lifecycle?.assertActive("回写本地附件");
+    let promotedPath: string | null = null;
     try {
-      blob = new Blob([await this.plugin.app.vault.readBinary(file)]);
-    } catch (error) {
-      console.error("[oss] 读取兜底附件失败", file.path, error);
-      notice.setMessage(`兜底上传失败（保留本地）：无法读取 ${file.name}`);
-      setTimeout(() => notice.hide(), 4000);
+      const targetPath = await this.plugin.app.fileManager.getAvailablePathForAttachment(
+        input.name || `pasted-${input.tempId}.${input.ext}`,
+        input.sourcePath,
+      );
+      promotedPath = targetPath;
+      this.suppressedLocalPaths.add(targetPath);
+      this.lifecycle?.assertActive("创建本地恢复附件");
+      const localFile = await this.plugin.app.vault.createBinary(
+        targetPath,
+        await input.blob.arrayBuffer(),
+      );
+      const promotedMtime = localFile.stat.mtime;
+      const generated = this.plugin.app.fileManager.generateMarkdownLink(localFile, input.sourcePath);
+      const localReference = generated.startsWith("!") ? generated : `!${generated}`;
+      this.lifecycle?.assertActive("修改附件引用");
+      let replaced = view.file?.path === input.sourcePath &&
+        replaceExactInEditor(editor, input.placeholder, localReference);
+      if (replaced) await view.save();
+      if (!replaced) replaced = await replaceExactInVault(
+        this.plugin.app.vault,
+        input.sourcePath,
+        input.locator,
+        localReference,
+        () => this.lifecycle?.assertActive("修改附件引用"),
+      );
+      const pending = this.manager.getPending(input.tempId);
+      let retryPending = pending;
+      const recoveryLocator = replaced
+        ? await locatePersistedLocalReference(
+          this.plugin.app.vault,
+          input.sourcePath,
+          input.locator,
+          localReference,
+        )
+        : undefined;
+      if (pending?.phase === "staged" && !pending.uploadId) {
+        // No remote side effect exists. The ordinary local attachment is now
+        // the source of truth, so a half-created staging journal is unnecessary.
+        await this.manager.discardMissingStagingTask(input.tempId).catch((error) => {
+          console.warn("[oss] 无法清除未开始上传的 staging journal", error);
+        });
+        retryPending = this.manager.getPending(input.tempId);
+      } else if (pending) {
+        if (!recoveryLocator) throw new Error("本地附件已写入，但无法确认持久化引用位置");
+        // Persist the new recoverable source before removing its staging copy.
+        await this.manager.bindLocalRecovery(input.tempId, localFile.path, recoveryLocator, promotedMtime);
+        retryPending = this.manager.getPending(input.tempId);
+      }
+      if (replaced) await this.deleteLocalFile(input.stagingPath, input.size, input.sourceMtime);
+      if (retryPending) {
+        if (!recoveryLocator) throw new Error("引用未安全恢复，staging 已保留");
+        await this.manager.bindLocalRecovery(
+          input.tempId,
+          localFile.path,
+          recoveryLocator,
+          promotedMtime,
+          true,
+        ).catch((error) => {
+          console.warn("[oss] 已安全回写本地，但 stagingPath journal 清理失败", error);
+        });
+        this.retryIndicator?.push(retryEntryFor(retryPending, localFile.path));
+      } else this.retryIndicator?.push({
+        mdPath: input.sourcePath,
+        localPath: localFile.path,
+        ext: input.ext,
+        occurrenceId: input.tempId,
+      });
+      new Notice(replaced
+        ? `上传失败，已安全回写本地：${localFile.path}（可稍后重试）`
+        : `上传失败；附件已安全保存到 ${localFile.path}，原占位已被修改，未强行恢复引用`);
+    } catch (writeError) {
+      console.error("[oss] 本地回写失败，保留 staging 与占位", writeError);
+      const pending = this.manager.getPending(input.tempId);
+      if (pending) this.retryIndicator?.push(retryEntryFor(pending));
+      new Notice(`上传失败且无法写入附件目录；staging 与占位已保留。上传错误：${errorMessage(uploadError)}`);
+    } finally {
+      if (promotedPath) setTimeout(() => this.suppressedLocalPaths.delete(promotedPath!), 1000);
+    }
+  }
+
+  /** Last-resort durability lane for an input already removed from Obsidian's default flow. */
+  private async preserveCapturedAfterDurabilityFailure(
+    input: StagedInput,
+    editor: Editor,
+    view: MarkdownView,
+    originalError: unknown,
+  ): Promise<void> {
+    let targetPath: string | null = null;
+    try {
+      targetPath = await this.plugin.app.fileManager.getAvailablePathForAttachment(
+        input.name || `recovered-${input.tempId}.${input.ext}`,
+        input.sourcePath,
+      );
+      this.suppressedLocalPaths.add(targetPath);
+      const localFile = await this.plugin.app.vault.createBinary(
+        targetPath,
+        await input.blob.arrayBuffer(),
+      );
+      let replaced = false;
+      if (!this.lifecycle || this.lifecycle.isActive) {
+        const generated = this.plugin.app.fileManager.generateMarkdownLink(localFile, input.sourcePath);
+        const localReference = generated.startsWith("!") ? generated : `!${generated}`;
+        this.lifecycle?.assertActive("回写已捕获附件引用");
+        replaced = view.file?.path === input.sourcePath &&
+          replaceExactInEditor(editor, input.placeholder, localReference);
+        if (replaced) await view.save();
+        if (!replaced) {
+          replaced = await replaceExactInVault(
+            this.plugin.app.vault,
+            input.sourcePath,
+            input.locator,
+            localReference,
+            () => this.lifecycle?.assertActive("回写已捕获附件引用"),
+          );
+        }
+        if (replaced) {
+          this.retryIndicator?.push({
+            mdPath: input.sourcePath,
+            localPath: localFile.path,
+            ext: input.ext,
+            occurrenceId: input.tempId,
+          });
+          const pending = this.manager.getPending(input.tempId);
+          if (pending?.phase === "staged" && !pending.uploadId) {
+            await this.manager.discardMissingStagingTask(input.tempId).catch((error) => {
+              console.warn("[oss] 本地保全后清理未启动 journal 失败", error);
+            });
+          }
+          this.lifecycle?.assertActive("清理已回写的 staging");
+          await this.deleteLocalFile(input.stagingPath, input.size, input.sourceMtime);
+        }
+      }
+      new Notice(replaced
+        ? `附件持久化异常，已安全回写本地：${localFile.path}`
+        : `附件持久化异常，已安全保存到 ${localFile.path}；原占位保留，请重新插入该附件`);
+    } catch (recoveryError) {
+      console.error("[oss] 已捕获附件的最终本地保全失败", recoveryError, originalError);
+      new Notice("附件已读取但 staging 与本地保全均失败；请立即重新粘贴或拖入原文件");
+    } finally {
+      if (targetPath) setTimeout(() => this.suppressedLocalPaths.delete(targetPath!), 1000);
+    }
+  }
+
+  private async handleCreate(file: TFile): Promise<void> {
+    this.lifecycle?.assertActive("处理新落地附件");
+    if (!this.settings.autoUpload || this.disposed) return;
+    if (!(file instanceof TFile) || !isSupportedExt(file.extension)) return;
+    if (isInternalStagingPath(file.path) || this.suppressedLocalPaths.has(file.path)) return;
+    if (isOversizedOnMobile(file.stat.size)) {
+      new Notice(`附件较大，移动端已保留本地且未自动上传：${file.name}`);
       return;
     }
+
+    const initial = await waitForOccurrences(this.plugin, file, this.backlinks);
+    if (initial.length === 0) return;
+    const originalSize = file.stat.size;
+    const originalMtime = file.stat.mtime;
+    const metadataBaseline = this.backlinks.generation;
+    const notice = new Notice(`兜底上传：${file.name}`, 0);
+    const blob = new Blob([await this.plugin.app.vault.readBinary(file)]);
     let failed = 0;
-    for (const occurrence of occurrences) {
+
+    for (const occurrence of initial) {
       try {
-        const { objectKey, tempId } = await this.manager.upload({
-          blob,
-          ext: file.extension,
-          sourcePath: occurrence.sourcePath,
+        await this.uploadAndCommitOccurrence(file, blob, occurrence, originalMtime);
+      } catch (error) {
+        if (isLifecycleUploadPause(error)) throw error;
+        failed++;
+        console.error("[oss] 引用实例兜底上传失败", occurrence, error);
+        const pending = this.manager.findPendingFor({
           localPath: file.path,
+          sourcePath: occurrence.sourcePath,
           occurrenceId: occurrence.occurrenceId,
         });
-        const replaced = await replaceOneResolvedAttachmentReference(
-          this.plugin.app.vault,
-          this.plugin.app.metadataCache,
-          file,
-          occurrence.sourcePath,
-          objectKey,
-        );
-        if (!replaced) throw new Error("引用实例未能确认替换");
-        await this.manager.finalize(tempId);
-      } catch (err) {
-        failed++;
-        console.error("[oss] 引用实例兜底上传失败", occurrence, err);
-        this.retryIndicator?.push({
+        this.retryIndicator?.push(pending ? retryEntryFor(pending) : {
           mdPath: occurrence.sourcePath,
           localPath: file.path,
           ext: file.extension,
@@ -193,127 +542,498 @@ export class AttachmentInterceptor {
         });
       }
     }
-    if (failed === 0) {
-      await this.plugin.app.vault.delete(file);
-      notice.setMessage(`兜底上传完成：${file.name}（${occurrences.length} 个独立引用）`);
-      setTimeout(() => notice.hide(), 2000);
+
+    const final = await this.finalOccurrences(file, metadataBaseline);
+    const remaining = final.occurrences;
+    const unchanged = file.stat.size === originalSize && file.stat.mtime === originalMtime;
+    if (final.confirmed && failed === 0 && remaining.length === 0 && unchanged) {
+      try {
+        this.lifecycle?.assertActive("删除已迁移本地附件");
+        await this.plugin.app.vault.delete(file);
+        await this.manager.finalizeCleanupForPath(file.path);
+        notice.setMessage(`兜底上传完成：${file.name}（${initial.length} 个独立引用）`);
+      } catch (error) {
+        notice.setMessage(`OSS 引用已提交，但本地清理失败，可从任务中心重试：${file.name}`);
+      }
     } else {
-      notice.setMessage(`兜底上传部分失败：${failed}/${occurrences.length}（已保留本地）`);
-      setTimeout(() => notice.hide(), 4000);
+      const reason = !final.confirmed
+        ? "MetadataCache 未在安全窗口内稳定，无法确认是否有新增引用"
+        : remaining.length > 0
+          ? `检测到 ${remaining.length} 个新增/未完成引用`
+          : "附件内容已变化";
+      notice.setMessage(`兜底上传未清理本地：${failed} 个失败；${reason}`);
     }
+    setTimeout(() => notice.hide(), 4000);
   }
 
-  /**
-   * 供 RetryIndicator 回调：把回写到本地的失败附件重新推给 OSS。
-   * 成功后替换引用 + 删除本地文件；失败则抛出交由调用方决定。
-   */
-  async retryEntries(entries: RetryEntry[]): Promise<void> {
-    const vault = this.plugin.app.vault;
-    const failures: RetryEntry[] = [];
-    for (const entry of entries) {
-      const file = vault.getAbstractFileByPath(entry.localPath);
+  private async uploadAndCommitOccurrence(
+    file: TFile,
+    blob: Blob,
+    occurrence: AttachmentOccurrence,
+    sourceMtime?: number,
+  ): Promise<string> {
+    const uploaded = await this.manager.upload({
+      blob,
+      ext: file.extension,
+      sourcePath: occurrence.sourcePath,
+      localPath: file.path,
+      displayName: file.name,
+      occurrenceId: occurrence.occurrenceId,
+      locator: occurrence.locator,
+      sourceMtime,
+      automatic: true,
+    });
+    const pending = this.manager.getPending(uploaded.tempId);
+    if (pending?.phase !== "cleanup_pending") {
+      this.lifecycle?.assertActive("修改附件引用");
+      await this.manager.markReferenceCommitting(uploaded.tempId);
+      const replaced = await replaceOneResolvedAttachmentReference(
+        this.plugin.app.vault,
+        this.plugin.app.metadataCache,
+        file,
+        occurrence.sourcePath,
+        uploaded.objectKey,
+        occurrence,
+        () => this.lifecycle?.assertActive("修改附件引用"),
+      );
+      if (!replaced && !await sourceContainsObject(this.plugin.app.vault, occurrence.sourcePath, uploaded.objectKey)) {
+        throw new Error("引用实例未能确认替换");
+      }
+      await this.manager.markCleanupPending(uploaded.tempId);
+    }
+    return uploaded.tempId;
+  }
+
+  async retryEntries(entries: RetryEntry[]): Promise<RetryBatchResult> {
+    this.lifecycle?.assertActive("重试上传任务");
+    const succeeded: RetryEntry[] = [];
+    const failed: RetryEntry[] = [];
+    const affectedPaths = new Set<string>();
+    const pathsWithReferenceWrites = new Set<string>();
+    const metadataBaselines = new Map(
+      entries.map((entry) => [entry.localPath, this.backlinks.generation]),
+    );
+    for (const entry of dedupeRetryEntries(entries)) {
+      const file = this.plugin.app.vault.getAbstractFileByPath(entry.localPath);
       if (!(file instanceof TFile)) {
-        console.warn("[oss-retry] 本地文件已不存在，跳过", entry.localPath);
+        const pending = entry.tempId ? this.manager.getPending(entry.tempId) : undefined;
+        if (entry.localPath && pending?.phase === "cleanup_pending" &&
+            pending.localPath === entry.localPath) {
+          await this.manager.ensurePendingStorageIdentity(pending.tempId);
+          await this.manager.finalize(entry.tempId!);
+          succeeded.push(entry);
+        } else {
+          console.warn("[oss-retry] 本地源已不存在", entry.localPath);
+          failed.push(entry);
+        }
+        continue;
+      }
+      if (isOversizedOnMobile(file.stat.size)) {
+        failed.push(entry);
         continue;
       }
       try {
-        const buf = await vault.readBinary(file);
-        const blob = new Blob([buf]);
-        const { objectKey, tempId } = await this.manager.upload({
-          blob,
-          ext: entry.ext,
-          sourcePath: entry.mdPath,
-          localPath: entry.localPath,
-          occurrenceId: entry.occurrenceId,
-        });
-        const replaced = await replaceOneResolvedAttachmentReference(
-          vault,
-          this.plugin.app.metadataCache,
-          file,
-          entry.mdPath,
-          objectKey,
-        );
-        if (!replaced) {
-          throw new Error(`未找到 ${entry.localPath} 的真实引用，本地文件已保留`);
+        const pendingBefore = entry.tempId
+          ? this.manager.getPending(entry.tempId)
+          : this.manager.findPendingFor({
+            localPath: entry.localPath,
+            sourcePath: entry.mdPath,
+            occurrenceId: entry.occurrenceId,
+          });
+        if (pendingBefore) await this.manager.ensurePendingStorageIdentity(pendingBefore.tempId);
+        if (pendingBefore?.phase !== "cleanup_pending") {
+          const blob = new Blob([await this.plugin.app.vault.readBinary(file)]);
+          const uploaded = await this.manager.upload({
+            blob,
+            ext: entry.ext,
+            sourcePath: entry.mdPath,
+            localPath: entry.localPath,
+            tempId: pendingBefore?.tempId,
+            displayName: pendingBefore?.displayName ?? file.name,
+            occurrenceId: entry.occurrenceId,
+            locator: pendingBefore?.locator,
+            sourceMtime: file.stat.mtime,
+          });
+          const wroteReference = await this.commitRetryReference(
+            file,
+            uploaded.tempId,
+            uploaded.objectKey,
+            entry,
+            pendingBefore,
+          );
+          if (wroteReference) pathsWithReferenceWrites.add(file.path);
         }
-        await this.manager.finalize(tempId);
-        const remaining = await findResolvedAttachmentOccurrences(vault, this.plugin.app.metadataCache, file);
-        if (remaining.length === 0) await vault.delete(file);
-        new Notice(`重试成功：${entry.localPath}`);
-      } catch (err) {
-        console.error("[oss-retry] 重试失败", entry, err);
-        failures.push(entry);
+        affectedPaths.add(file.path);
+        succeeded.push(entry);
+      } catch (error) {
+        if (isLifecycleUploadPause(error)) throw error;
+        console.error("[oss-retry] 重试失败", entry, error);
+        failed.push(entry);
       }
     }
-    if (failures.length > 0) {
-      throw new Error(`${failures.length} 个附件重试仍失败`);
+
+    for (const localPath of affectedPaths) {
+      if (failed.some((entry) => entry.localPath === localPath)) continue;
+      const file = this.plugin.app.vault.getAbstractFileByPath(localPath);
+      if (!(file instanceof TFile)) continue;
+      if (!this.cleanupTasksMatchFile(file)) {
+        console.warn("[oss-retry] 本地附件在上传后已变化，拒绝清理", localPath);
+        for (const entry of succeeded.filter((item) => item.localPath === localPath)) {
+          if (!failed.includes(entry)) failed.push(entry);
+        }
+        new Notice(`本地附件已变化，已保留且未删除：${localPath}`);
+        continue;
+      }
+      const final = await this.finalOccurrences(
+        file,
+        metadataBaselines.get(localPath) ?? this.backlinks.generation,
+        pathsWithReferenceWrites.has(localPath),
+      );
+      if (!final.confirmed || final.occurrences.length > 0) {
+        for (const entry of succeeded.filter((item) => item.localPath === localPath)) {
+          if (!failed.includes(entry)) failed.push(entry);
+        }
+        continue;
+      }
+      const currentFile = this.plugin.app.vault.getAbstractFileByPath(localPath);
+      if (!(currentFile instanceof TFile) || !this.cleanupTasksMatchFile(currentFile)) {
+        console.warn("[oss-retry] 稳定等待期间本地附件已变化，拒绝清理", localPath);
+        for (const entry of succeeded.filter((item) => item.localPath === localPath)) {
+          if (!failed.includes(entry)) failed.push(entry);
+        }
+        new Notice(`稳定复核期间附件已变化，已保留且未删除：${localPath}`);
+        continue;
+      }
+      try {
+        this.lifecycle?.assertActive("删除已迁移本地附件");
+        await this.plugin.app.vault.delete(currentFile);
+        await this.manager.finalizeCleanupForPath(localPath);
+        new Notice(`重试成功：${localPath}`);
+      } catch (error) {
+        console.error("[oss-retry] 本地清理失败", localPath, error);
+        for (const entry of succeeded.filter((item) => item.localPath === localPath)) {
+          if (!failed.includes(entry)) failed.push(entry);
+        }
+      }
     }
+    return { succeeded: succeeded.filter((entry) => !failed.includes(entry)), failed };
+  }
+
+  /** Callable from desktop commands and mobile settings; no status bar dependency. */
+  async retryAll(): Promise<RetryBatchResult> {
+    const entries = Object.values(this.settings.pendingUploads)
+      .map((pending) => retryEntryFor(pending));
+    return this.retryEntries(entries);
+  }
+
+  async retryPending(): Promise<void> {
+    const result = await this.retryAll();
+    if (result.failed.length > 0) {
+      throw new Error(`${result.failed.length} 个上传任务仍未完成；本地数据与任务状态已保留`);
+    }
+    if (result.succeeded.length === 0) new Notice("当前没有可重试的上传任务");
+  }
+
+  /**
+   * Recover the byte-first crash window: a stage may exist before its journal
+   * write. This inspects only the reserved internal folder and performs no OSS
+   * request or Vault-wide content scan.
+   */
+  async recoverUnjournaledStaging(): Promise<string[]> {
+    const vault = this.plugin.app.vault;
+    if (typeof vault.getAbstractFileByPath !== "function") return [];
+    const folder = vault.getAbstractFileByPath(STAGING_DIR);
+    if (!(folder instanceof TFolder)) return [];
+    const claimed = new Set<string>();
+    for (const pending of Object.values(this.settings.pendingUploads ?? {})) {
+      if (pending.stagingPath) claimed.add(pending.stagingPath);
+      if (pending.localPath && isInternalStagingPath(pending.localPath)) claimed.add(pending.localPath);
+    }
+
+    const recovered: string[] = [];
+    for (const child of [...folder.children]) {
+      if (!(child instanceof TFile) || claimed.has(child.path)) continue;
+      const match = child.name.match(/^([0-9a-f-]{36})\.([a-z0-9]+)\.stage$/i);
+      if (!match || !isSupportedExt(match[2])) continue;
+      const targetName = `recovered-${match[1]}.${match[2].toLowerCase()}`;
+      let targetPath: string | null = null;
+      try {
+        targetPath = await this.plugin.app.fileManager.getAvailablePathForAttachment(targetName, "");
+        this.suppressedLocalPaths.add(targetPath);
+        this.lifecycle?.assertActive("恢复裸 staging");
+        await vault.rename(child, targetPath);
+        recovered.push(targetPath);
+      } catch (error) {
+        console.error("[oss] 裸 staging 恢复失败，原文件保留", child.path, error);
+      } finally {
+        if (targetPath) setTimeout(() => this.suppressedLocalPaths.delete(targetPath!), 1000);
+      }
+    }
+    if (recovered.length > 0) {
+      new Notice(`已从异常中恢复 ${recovered.length} 个附件到本地；请在文件列表中重新插入对应附件`);
+    }
+    return recovered;
+  }
+
+  private async commitRetryReference(
+    localFile: TFile,
+    tempId: string,
+    objectKey: string,
+    entry: RetryEntry,
+    pendingBefore?: PendingUpload,
+  ): Promise<boolean> {
+    const pending = this.manager.getPending(tempId) ?? pendingBefore;
+    this.lifecycle?.assertActive("修改附件引用");
+    await this.manager.markReferenceCommitting(tempId);
+    let committed = false;
+    if (pending?.locator?.kind === "placeholder") {
+      committed = await replaceUploadingPlaceholder(
+        this.plugin.app.vault,
+        entry.mdPath,
+        pending.locator,
+        objectKey,
+        pending.displayName ?? localFile.name,
+        () => this.lifecycle?.assertActive("修改附件引用"),
+      );
+    }
+    if (!committed && !isInternalStagingPath(localFile.path)) {
+      committed = await replaceOneResolvedAttachmentReference(
+        this.plugin.app.vault,
+        this.plugin.app.metadataCache,
+        localFile,
+        entry.mdPath,
+        objectKey,
+        pending?.locator?.kind === "attachment" ? pending.locator : undefined,
+        () => this.lifecycle?.assertActive("修改附件引用"),
+      );
+    }
+    if (!committed && !await sourceContainsObject(this.plugin.app.vault, entry.mdPath, objectKey)) {
+      throw new Error(`未找到 ${entry.localPath} 的精确引用，已保留本地文件`);
+    }
+    await this.manager.markCleanupPending(tempId);
+    return committed;
+  }
+
+  private async finalOccurrences(
+    file: TFile,
+    baseline: number,
+    requireNewResolution = true,
+  ): Promise<StableOccurrenceResult> {
+    this.backlinks.invalidate();
+    return waitForStableAttachmentOccurrences(
+      this.plugin.app.vault,
+      this.plugin.app.metadataCache,
+      file,
+      this.metadataResolutionTracking
+        ? {
+          baseline,
+          current: () => this.backlinks.generation,
+          requireNewResolution,
+          hasResolvedSnapshot: () => this.backlinks.hasResolved,
+        }
+        : undefined,
+    );
+  }
+
+  private cleanupTasksMatchFile(file: TFile): boolean {
+    const tasks = Object.values(this.settings.pendingUploads).filter((pending) =>
+      pending.localPath === file.path
+    );
+    return tasks.length > 0 && tasks.every((pending) => {
+      if (pending.phase !== "cleanup_pending") return false;
+      if (pending.size !== file.stat.size) return false;
+      if (isInternalStagingPath(file.path)) {
+        return pending.sourceMtime === undefined || pending.sourceMtime === file.stat.mtime;
+      }
+      return pending.sourceMtime !== undefined && pending.sourceMtime === file.stat.mtime;
+    });
+  }
+
+  private async ensureStagingFolder(): Promise<void> {
+    if (!this.stagingFolderReady) {
+      this.stagingFolderReady = (async () => {
+        const existing = this.plugin.app.vault.getAbstractFileByPath(STAGING_DIR);
+        if (existing instanceof TFolder) return;
+        if (existing) throw new Error(`${STAGING_DIR} 已被同名文件占用`);
+        await this.plugin.app.vault.createFolder(STAGING_DIR);
+      })().catch((error) => {
+        this.stagingFolderReady = null;
+        throw error;
+      });
+    }
+    await this.stagingFolderReady;
+  }
+
+  private async deleteLocalFile(path: string, expectedSize?: number, expectedMtime?: number): Promise<void> {
+    const file = this.plugin.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    if (expectedSize !== undefined && file.stat.size !== expectedSize) {
+      throw new Error(`staging 大小已变化，已保留：${path}`);
+    }
+    if (expectedMtime !== undefined && file.stat.mtime !== expectedMtime) {
+      throw new Error(`staging 修改时间已变化，已保留：${path}`);
+    }
+    this.lifecycle?.assertActive("删除本地附件");
+    await this.plugin.app.vault.delete(file);
+  }
+
+  private startRoot(factory: () => Promise<void>, label: string): void {
+    let task: Promise<void>;
+    try {
+      task = this.lifecycle ? this.lifecycle.run(factory) : factory();
+    } catch (error) {
+      task = Promise.reject(error);
+    }
+    void task.catch((error) => {
+      if (error instanceof LifecycleQuiescedError) return;
+      console.error(`[oss] ${label}处理失败`, error);
+    });
   }
 }
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
+export function clipboardFiles(event: ClipboardEvent): File[] {
+  const data = event.clipboardData;
+  const itemFiles = Array.from(data?.items ?? [])
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+  const listed = Array.from(data?.files ?? []);
+  const combined = itemFiles.length > 0 ? [...itemFiles, ...listed] : listed;
+  return combined.filter((file, index) => combined.indexOf(file) === index);
+}
 
-function clipboardFiles(evt: ClipboardEvent): File[] {
-  const items = evt.clipboardData?.items;
-  if (!items) return [];
-  const files: File[] = [];
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    if (item.kind !== "file") continue;
-    const f = item.getAsFile();
-    if (f) files.push(f);
+export function isInternalStagingPath(path: string): boolean {
+  return path === STAGING_DIR || path.startsWith(`${STAGING_DIR}/`);
+}
+
+function insertAllPlaceholders(editor: Editor, inputs: PreparedInput[]): void {
+  const cursor = editor.getCursor();
+  const baseOffset = editor.posToOffset(cursor);
+  const separator = "\n";
+  const block = inputs.map((input) => input.placeholder).join(separator);
+  editor.replaceRange(block, cursor);
+  const content = editor.getValue();
+  let offset = baseOffset;
+  for (const input of inputs) {
+    input.locator = {
+      kind: "placeholder",
+      sourcePath: input.sourcePath,
+      original: input.placeholder,
+      start: offset,
+      end: offset + input.placeholder.length,
+      alt: input.file.name,
+      before: content.slice(Math.max(0, offset - 32), offset),
+      after: content.slice(offset + input.placeholder.length, offset + input.placeholder.length + 32),
+    };
+    offset += input.placeholder.length + separator.length;
   }
-  return files;
 }
 
-function hasClipboardText(evt: ClipboardEvent): boolean {
-  return Boolean(evt.clipboardData?.getData("text/plain") || evt.clipboardData?.getData("text/html"));
+function replaceExactInEditor(editor: Editor, from: string, to: string): boolean {
+  const content = editor.getValue();
+  const index = content.indexOf(from);
+  if (index < 0) return false;
+  editor.replaceRange(to, editor.offsetToPos(index), editor.offsetToPos(index + from.length));
+  return true;
 }
 
-function extOf(name: string, mime: string): string {
-  const idx = name.lastIndexOf(".");
-  if (idx >= 0 && idx < name.length - 1) return name.slice(idx + 1).toLowerCase();
-  // 剪贴板截图无文件名时靠 mime 推断
-  const explicitMimeExt: Record<string, string> = {
-    "image/avif": "avif",
-    "video/ogg": "ogv",
-    "video/x-m4v": "m4v",
-    "audio/aac": "aac",
-    "audio/opus": "opus",
+async function replaceExactInVault(
+  vault: Vault,
+  sourcePath: string,
+  locator: PendingReferenceLocator,
+  replacement: string,
+  beforeCommit?: () => void,
+): Promise<boolean> {
+  const file = vault.getAbstractFileByPath(sourcePath);
+  if (!(file instanceof TFile)) return false;
+  let replaced = false;
+  await vault.process(file, (content) => {
+    const index = content.indexOf(locator.original);
+    if (index < 0) return content;
+    beforeCommit?.();
+    replaced = true;
+    return content.slice(0, index) + replacement + content.slice(index + locator.original.length);
+  });
+  return replaced;
+}
+
+async function sourceContainsObject(vault: Vault, sourcePath: string, objectKey: string): Promise<boolean> {
+  const file = vault.getAbstractFileByPath(sourcePath);
+  return file instanceof TFile && hasOssReference(await vault.cachedRead(file), objectKey);
+}
+
+async function locatePersistedLocalReference(
+  vault: Vault,
+  sourcePath: string,
+  previous: PendingReferenceLocator,
+  original: string,
+): Promise<PendingReferenceLocator | undefined> {
+  const file = vault.getAbstractFileByPath(sourcePath);
+  if (!(file instanceof TFile)) return undefined;
+  const content = await vault.read(file);
+  const candidates: number[] = [];
+  let from = 0;
+  while (from <= content.length) {
+    const index = content.indexOf(original, from);
+    if (index < 0) break;
+    candidates.push(index);
+    from = index + Math.max(1, original.length);
+  }
+  if (candidates.length === 0) return undefined;
+  const start = candidates.reduce((closest, candidate) => {
+    const score = (offset: number): number => {
+      let value = Math.abs(offset - previous.start);
+      if (previous.before && !content.slice(Math.max(0, offset - previous.before.length), offset)
+        .endsWith(previous.before)) value += content.length;
+      if (previous.after && !content.slice(offset + original.length, offset + original.length + previous.after.length)
+        .startsWith(previous.after)) value += content.length;
+      return value;
+    };
+    return score(candidate) < score(closest) ? candidate : closest;
+  });
+  return {
+    kind: "attachment",
+    sourcePath,
+    original,
+    start,
+    end: start + original.length,
+    alt: previous.alt,
+    before: content.slice(Math.max(0, start - 32), start),
+    after: content.slice(start + original.length, start + original.length + 32),
   };
-  if (explicitMimeExt[mime.toLowerCase()]) return explicitMimeExt[mime.toLowerCase()];
-  const m = mime.match(/\/([\w.+-]+)$/);
-  if (m) {
-    const raw = m[1].toLowerCase();
-    if (raw === "jpeg") return "jpg";
-    if (raw === "quicktime") return "mov";
-    if (raw === "x-matroska") return "mkv";
-    return raw;
-  }
-  return "";
 }
 
-function escapeAlt(name: string): string {
-  return name.replace(/[[\]]/g, "");
+function retryEntryFor(pending: PendingUpload, localPath = pending.localPath): RetryEntry {
+  return {
+    tempId: pending.tempId,
+    mdPath: pending.sourcePath,
+    localPath: localPath ?? pending.stagingPath ?? "",
+    ext: pending.ext,
+    occurrenceId: pending.occurrenceId,
+  };
 }
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+function dedupeRetryEntries(entries: RetryEntry[]): RetryEntry[] {
+  const seen = new Set<string>();
+  return entries.filter((entry) => {
+    const key = entry.tempId ?? `${entry.localPath}\0${entry.mdPath}\0${entry.occurrenceId ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function waitForOccurrences(plugin: Plugin, file: TFile) {
+async function waitForOccurrences(
+  plugin: Plugin,
+  file: TFile,
+  backlinks: ResolvedAttachmentBacklinkCache,
+): Promise<AttachmentOccurrence[]> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const occurrences = await findResolvedAttachmentOccurrences(
       plugin.app.vault,
       plugin.app.metadataCache,
       file,
+      backlinks.get(file.path),
     );
     if (occurrences.length > 0) return occurrences;
     await sleep(300);
@@ -321,45 +1041,46 @@ async function waitForOccurrences(plugin: Plugin, file: TFile) {
   return [];
 }
 
-function isInPendingObjectKey(_path: string, _settings: PluginSettings): boolean {
-  return false;
+function extOf(name: string, mime: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot >= 0 && dot < name.length - 1) return name.slice(dot + 1).toLowerCase();
+  const byMime: Record<string, string> = {
+    "image/jpeg": "jpg",
+    "image/svg+xml": "svg",
+    "video/quicktime": "mov",
+    "video/x-matroska": "mkv",
+    "video/ogg": "ogv",
+    "video/x-m4v": "m4v",
+    "audio/mpeg": "mp3",
+    "audio/mp4": "m4a",
+    "audio/aac": "aac",
+    "audio/opus": "opus",
+  };
+  if (byMime[mime.toLowerCase()]) return byMime[mime.toLowerCase()];
+  return mime.match(/\/([\w.+-]+)$/)?.[1]?.toLowerCase() ?? "";
 }
 
-function replaceInEditor(editor: Editor, from: string, to: string): boolean {
-  const content = editor.getValue();
-  const idx = content.indexOf(from);
-  if (idx < 0) return false;
-  const startPos = editor.offsetToPos(idx);
-  const endPos = editor.offsetToPos(idx + from.length);
-  editor.replaceRange(to, startPos, endPos);
-  return true;
+function shouldKeepLocalOnThisDevice(files: File[]): boolean {
+  return isMobileUi() && files.reduce((sum, file) => sum + file.size, 0) > MOBILE_IN_MEMORY_LIMIT;
 }
 
-async function writeLocalAttachment(
-  vault: Vault,
-  mdFile: TFile | null,
-  fileName: string,
-  blob: Blob,
-): Promise<string | null> {
-  try {
-    const buf = await blob.arrayBuffer();
-    // 简化：写到 md 同目录，用原文件名（冲突则加时间戳）
-    const dir = mdFile?.parent?.path ?? "";
-    let name = fileName || `pasted-${Date.now()}.bin`;
-    let target = dir ? `${dir}/${name}` : name;
-    if (await vault.adapter.exists(target)) {
-      const dot = name.lastIndexOf(".");
-      const base = dot >= 0 ? name.slice(0, dot) : name;
-      const ext = dot >= 0 ? name.slice(dot) : "";
-      name = `${base}-${Date.now()}${ext}`;
-      target = dir ? `${dir}/${name}` : name;
-    }
-    await vault.adapter.writeBinary(target, buf);
-    return target;
-  } catch (err) {
-    console.error("[oss] 本地回写失败", err);
-    return null;
-  }
+export function isOversizedOnMobile(size: number): boolean {
+  return isMobileUi() && size > MOBILE_IN_MEMORY_LIMIT;
+}
+
+function isMobileUi(): boolean {
+  return typeof document !== "undefined" && document.body?.classList.contains("is-mobile") === true;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 export interface CapturedAttachment {
@@ -388,4 +1109,11 @@ export function formatInputReadError(error: unknown): string {
     return "无法读取附件：文件可能仅存在云盘（如 iCloud、OneDrive 等），请先下载到本地后重试";
   }
   return `无法读取输入附件：${message}`;
+}
+
+export function formatInputReadFailureMarker(fileName: string): string {
+  const safeName = fileName
+    .replace(/[\r\n]+/g, " ")
+    .replace(/([\\`*_[\]<>])/g, "\\$1");
+  return `⚠ 附件读取失败：${safeName}（请下载到本地后重新粘贴）`;
 }

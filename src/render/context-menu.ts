@@ -1,10 +1,15 @@
-import { Menu, Modal, Notice, Plugin, MarkdownView, TFile } from "obsidian";
-import { OSS_URL_REGEX } from "../types";
+import { Menu, Modal, Notice, Plugin, TFile } from "obsidian";
+import { formatOssReference, removeFirstOssReference, scanOssReferences } from "../reference/codec";
+import type { LeaseUrlResolver } from "./url-resolver";
+import { isUrlResolverDisposed, resolveUrlLease } from "./url-resolver";
 
 export type AttachmentKind = "img" | "video" | "audio" | "pdf";
 
 export interface AttachmentContextMenuBinder {
   bind(element: HTMLElement, kind: AttachmentKind, url: string, key: string, sourcePath?: string): void;
+  unbind?(element: HTMLElement): void;
+  sourcePathFor?(element: HTMLElement, key: string): string | undefined;
+  dispose?(): void;
 }
 
 export type ConfirmReferenceRemoval = (
@@ -16,7 +21,6 @@ export type ConfirmReferenceRemoval = (
 
 interface ContextData {
   kind: AttachmentKind;
-  url: string;
   key: string;
   sourcePath?: string;
 }
@@ -32,36 +36,98 @@ const TYPE_LABEL: Record<AttachmentKind, string> = {
 export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
   private readonly data = new WeakMap<HTMLElement, ContextData>();
   private readonly previewData = new WeakMap<HTMLElement, ContextData>();
+  private readonly listeners = new WeakMap<HTMLElement, (event: MouseEvent) => void>();
+  private readonly previewBindings = new WeakMap<HTMLElement, { host: HTMLElement; button: HTMLButtonElement }>();
+  private readonly ownedPreviewButtons = new WeakSet<HTMLButtonElement>();
+  private readonly lifetime = new AbortController();
+  private readonly openMenus = new Set<Menu>();
+  private readonly previewModals = new Set<OssImagePreviewModal>();
+  private active = true;
 
   constructor(
     private readonly plugin: Plugin,
     private readonly confirmReferenceRemoval?: ConfirmReferenceRemoval,
+    private readonly explicitResolver?: LeaseUrlResolver,
   ) {}
 
-  bind(element: HTMLElement, kind: AttachmentKind, url: string, key: string, sourcePath?: string): void {
-    this.data.set(element, { kind, url, key, sourcePath });
+  bind(element: HTMLElement, kind: AttachmentKind, _url: string, key: string, sourcePath?: string): void {
+    if (!this.active) return;
+    this.data.set(element, { kind, key, sourcePath });
     if (kind === "img") this.bindImagePreview(element);
-    if (element.dataset.ossContextMenuBound === "true") return;
+    if (this.listeners.has(element)) return;
     element.dataset.ossContextMenuBound = "true";
-    element.addEventListener("contextmenu", (event) => {
+    const listener = (event: MouseEvent) => {
       const current = this.data.get(element);
       if (!current) return;
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
-      this.open(event, current);
-    });
+      this.open(event, element, current);
+    };
+    this.listeners.set(element, listener);
+    element.addEventListener("contextmenu", listener, { signal: this.lifetime.signal });
+  }
+
+  unbind(element: HTMLElement): void {
+    this.data.delete(element);
+    const listener = this.listeners.get(element);
+    if (listener) element.removeEventListener("contextmenu", listener);
+    this.listeners.delete(element);
+    delete element.dataset.ossContextMenuBound;
+    const preview = this.previewBindings.get(element);
+    if (preview) {
+      if (preview.button.isConnected || preview.button.parentElement) preview.button.remove();
+      this.previewData.delete(preview.host);
+      if (!preview.host.querySelector?.(".oss-image-zoom-button")) {
+        preview.host.classList.remove("oss-image-preview-host");
+      }
+    }
+    this.previewBindings.delete(element);
+  }
+
+  sourcePathFor(element: HTMLElement, key: string): string | undefined {
+    if (!this.active) return undefined;
+    const current = this.data.get(element);
+    return current?.key === key ? current.sourcePath : undefined;
+  }
+
+  /** Irreversibly release this plugin instance, including detached DOM listeners and overlays. */
+  dispose(): void {
+    if (!this.active) return;
+    this.active = false;
+    this.lifetime.abort();
+    for (const menu of [...this.openMenus]) menu.close();
+    this.openMenus.clear();
+    for (const modal of [...this.previewModals]) modal.close();
+    this.previewModals.clear();
   }
 
   private bindImagePreview(image: HTMLElement): void {
+    if (!this.active) return;
     const host = image.closest<HTMLElement>(".image-embed, .internal-embed") ?? image.parentElement;
     if (!host) return;
     const current = this.data.get(image);
     if (current) this.previewData.set(host, current);
     host.classList.add("oss-image-preview-host");
-    if (host.querySelector(":scope > .oss-image-zoom-button")) return;
+    const previous = this.previewBindings.get(image);
+    if (previous?.host === host) {
+      const current = this.data.get(image);
+      if (current) this.previewData.set(host, current);
+      return;
+    }
+    if (previous) this.unbindImagePreview(image, previous);
+
+    const existing = host.querySelector<HTMLButtonElement>(":scope > .oss-image-zoom-button");
+    if (existing && this.ownedPreviewButtons.has(existing)) {
+      this.previewBindings.set(image, { host, button: existing });
+      return;
+    }
+    // A hot-reloaded instance must not reuse the previous instance's button:
+    // its AbortSignal has already invalidated that detached click listener.
+    existing?.remove();
 
     const button = image.ownerDocument.createElement("button");
+    this.ownedPreviewButtons.add(button);
     button.type = "button";
     button.className = "oss-image-zoom-button clickable-icon";
     button.setAttribute("aria-label", "放大 OSS 图片");
@@ -70,53 +136,128 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (!this.active) return;
       const data = this.previewData.get(host);
-      if (data) new OssImagePreviewModal(this.plugin, data.url, data.key).open();
-    });
+      if (!data) return;
+      let modal!: OssImagePreviewModal;
+      modal = new OssImagePreviewModal(
+        this.plugin,
+        this.getResolver(),
+        data.key,
+        () => this.active,
+        () => this.previewModals.delete(modal),
+      );
+      this.previewModals.add(modal);
+      modal.open();
+    }, { signal: this.lifetime.signal });
     host.appendChild(button);
+    this.previewBindings.set(image, { host, button });
   }
 
-  private open(event: MouseEvent, data: ContextData): void {
+  private unbindImagePreview(image: HTMLElement, binding: { host: HTMLElement; button: HTMLButtonElement }): void {
+    binding.button.remove();
+    this.previewData.delete(binding.host);
+    binding.host.classList.remove("oss-image-preview-host");
+    this.previewBindings.delete(image);
+  }
+
+  private open(event: MouseEvent, element: HTMLElement, data: ContextData): void {
+    if (!this.active) return;
     const label = TYPE_LABEL[data.kind];
     const menu = new Menu();
+    this.openMenus.add(menu);
+    menu.onHide(() => this.openMenus.delete(menu));
     menu.addItem((item) => item
       .setTitle(`打开${label}`)
       .setIcon("external-link")
-      .onClick(() => window.open(data.url, "_blank", "noopener,noreferrer")));
+      .onClick(() => {
+        if (this.active) void this.openSignedUrl(element, data);
+      }));
     menu.addItem((item) => item
       .setTitle(`复制${label}访问链接（会过期）`)
       .setIcon("link")
-      .onClick(() => void copyText(data.url, "已复制临时访问链接（签名过期后失效）")));
+      .onClick(() => {
+        if (this.active) void this.copySignedUrl(element, data);
+      }));
     menu.addItem((item) => item
       .setTitle("复制 OSS Markdown 引用")
       .setIcon("copy")
-      .onClick(() => void copyText(`![](oss://${data.key})`, "已复制 OSS Markdown 引用")));
+      .onClick(() => {
+        if (this.active) void copyText(formatOssReference(data.key), "已复制 OSS Markdown 引用");
+      }));
 
-    const sourcePath = this.resolveSourcePath(data.sourcePath);
+    const sourcePath = data.sourcePath || null;
     if (sourcePath) {
       menu.addSeparator();
       menu.addItem((item) => item
         .setTitle(`移除${label}引用`)
         .setIcon("trash-2")
-        .onClick(() => void this.removeReference(sourcePath, data.key, label)));
+        .onClick(() => {
+          if (this.active) void this.removeReference(sourcePath, data.key, label);
+        }));
+    }
+    if (!this.active) {
+      menu.close();
+      return;
     }
     menu.showAtMouseEvent(event);
   }
 
-  private resolveSourcePath(explicit?: string): string | null {
-    if (explicit) return explicit;
-    return this.plugin.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path ?? null;
+  private getResolver(): LeaseUrlResolver {
+    if (!this.active) throw new Error("OSS 附件菜单已停止");
+    const resolver = this.explicitResolver ?? (this.plugin as Plugin & { urlResolver?: LeaseUrlResolver }).urlResolver;
+    if (!resolver) throw new Error("OSS 签名服务尚未就绪");
+    return resolver;
+  }
+
+  private isCurrent(element: HTMLElement, data: ContextData): boolean {
+    return this.active && this.data.get(element)?.key === data.key;
+  }
+
+  private async openSignedUrl(element: HTMLElement, data: ContextData): Promise<void> {
+    if (!this.active) return;
+    const popup = element.ownerDocument.defaultView?.open("", "_blank", "noopener,noreferrer") ?? null;
+    try {
+      const lease = await resolveUrlLease(this.getResolver(), data.key);
+      if (!this.isCurrent(element, data)) {
+        popup?.close();
+        return;
+      }
+      if (popup) popup.location.replace(lease.url);
+      else window.open(lease.url, "_blank", "noopener,noreferrer");
+    } catch {
+      popup?.close();
+      new Notice("无法生成临时访问链接，请检查 OSS 配置");
+    }
+  }
+
+  private async copySignedUrl(element: HTMLElement, data: ContextData): Promise<void> {
+    if (!this.active) return;
+    try {
+      const lease = await resolveUrlLease(this.getResolver(), data.key);
+      if (!this.isCurrent(element, data)) return;
+      await copyText(lease.url, "已复制临时访问链接（签名过期后失效）");
+    } catch {
+      new Notice("无法生成临时访问链接，请检查 OSS 配置");
+    }
   }
 
   private async removeReference(sourcePath: string, key: string, label: string): Promise<void> {
+    if (!this.active) return;
     const file = this.plugin.app.vault.getAbstractFileByPath(sourcePath);
     if (!(file instanceof TFile) || file.extension !== "md") {
       new Notice("无法确认附件所在 Markdown，未执行移除");
       return;
     }
     const current = await this.plugin.app.vault.cachedRead(file);
-    if (!removeOssReference(current, key).removed) {
+    if (!this.active) return;
+    const matches = scanOssReferences(current).filter((reference) => reference.key === key);
+    if (matches.length === 0) {
       new Notice(`未找到当前${label}引用，文档未修改`);
+      return;
+    }
+    if (matches.length !== 1) {
+      new Notice(`本文档有多个相同${label}引用，无法确认当前实例，未执行移除`);
       return;
     }
     if (!this.confirmReferenceRemoval) {
@@ -124,9 +265,13 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
       return;
     }
     this.confirmReferenceRemoval(sourcePath, key, label, async () => {
+      if (!this.active) return false;
       let removed = false;
       await this.plugin.app.vault.process(file, (content) => {
-        const result = removeOssReference(content, key);
+        const currentMatches = scanOssReferences(content).filter((reference) => reference.key === key);
+        const result = currentMatches.length === 1
+          ? removeOssReference(content, key)
+          : { content, removed: false };
         removed = result.removed;
         return result.content;
       });
@@ -136,39 +281,51 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
 }
 
 class OssImagePreviewModal extends Modal {
-  constructor(plugin: Plugin, private readonly url: string, private readonly key: string) {
+  private closed = false;
+
+  constructor(
+    plugin: Plugin,
+    private readonly resolver: LeaseUrlResolver,
+    private readonly key: string,
+    private readonly isOwnerActive: () => boolean,
+    private readonly release: () => void,
+  ) {
     super(plugin.app);
   }
 
   onOpen(): void {
+    if (!this.isOwnerActive() || isUrlResolverDisposed(this.resolver)) {
+      this.close();
+      return;
+    }
     this.modalEl.addClass("mod-oss-image-preview");
     this.contentEl.empty();
-    const image = this.contentEl.createEl("img", {
-      attr: { src: this.url, alt: this.key },
-    });
+    const image = this.contentEl.createEl("img", { attr: { alt: this.key } });
     image.addClass("oss-image-preview-content");
+    void resolveUrlLease(this.resolver, this.key).then(
+      (lease) => {
+        if (!this.closed && this.isOwnerActive() && !isUrlResolverDisposed(this.resolver) && image.isConnected) {
+          image.src = lease.url;
+        }
+      },
+      () => {
+        if (!this.closed && this.isOwnerActive() && image.isConnected) {
+          image.replaceWith(image.ownerDocument.createTextNode("图片预览链接生成失败"));
+        }
+      },
+    );
+  }
+
+  onClose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.contentEl.empty();
+    this.release();
   }
 }
 
 export function removeOssReference(content: string, key: string): { content: string; removed: boolean } {
-  const re = new RegExp(OSS_URL_REGEX.source, "g");
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(content)) !== null) {
-    if (normalizeKey(match[1]) !== key) continue;
-    return {
-      content: content.slice(0, match.index) + content.slice(match.index + match[0].length),
-      removed: true,
-    };
-  }
-  return { content, removed: false };
-}
-
-function normalizeKey(value: string): string {
-  try {
-    return decodeURIComponent(value.replace(/^\/+/, ""));
-  } catch {
-    return value.replace(/^\/+/, "");
-  }
+  return removeFirstOssReference(content, key);
 }
 
 async function copyText(value: string, successMessage: string): Promise<void> {

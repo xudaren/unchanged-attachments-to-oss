@@ -1,104 +1,106 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TFile } from "obsidian";
-import { DeleteWatcher, deleteRemoteObject } from "../../src/delete/watcher";
+import {
+  collectDocumentOssKeys,
+  DeleteWatcher,
+  deleteRemoteObject,
+} from "../../src/delete/watcher";
 import { OssError } from "../../src/oss/client";
 
-type EventName = "create" | "modify" | "delete" | "rename";
-
-function makeHarness(files: TFile[] = []) {
-  const listeners = new Map<EventName, Array<(...args: any[]) => void>>();
-  const contents = new Map<string, string>();
-  const vault = {
-    getMarkdownFiles: () => files,
-    cachedRead: async (file: TFile) => contents.get(file.path) ?? "",
-    on: (name: EventName, callback: (...args: any[]) => void) => {
-      const entries = listeners.get(name) ?? [];
-      entries.push(callback);
-      listeners.set(name, entries);
-      return { name, callback };
-    },
+function makeHarness(content = "") {
+  let fileMenu: ((menu: any, file: TFile) => void) | undefined;
+  const actions: string[] = [];
+  const client = {
+    deleteObject: async (key: string) => { actions.push(`remote:${key}`); },
   };
   const plugin = {
-    app: { vault },
+    app: {
+      vault: { cachedRead: async () => content },
+      workspace: {
+        on: (name: string, callback: (menu: any, file: TFile) => void) => {
+          if (name === "file-menu") fileMenu = callback;
+          return { name, callback };
+        },
+      },
+      fileManager: {
+        promptForDeletion: async () => true,
+        trashFile: async (file: TFile) => { actions.push(`trash:${file.path}`); },
+      },
+    },
     registerEvent: () => undefined,
-    register: () => undefined,
   };
-  const emit = (name: EventName, ...args: any[]) => {
-    for (const callback of listeners.get(name) ?? []) callback(...args);
+  return {
+    actions,
+    client,
+    plugin,
+    getFileMenu: () => fileMenu,
+    watcher: () => new DeleteWatcher(plugin as never, client as never),
   };
-  return { contents, plugin, emit };
 }
 
-async function flushTimers(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 10));
-}
-
-// DeleteWatcher uses the Obsidian window timer API; make debounce immediate in unit tests.
-(globalThis as any).window = {
-  setTimeout: (callback: () => void) => setTimeout(callback, 0),
-  clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
-};
-
-test("registers listeners before the initial vault scan finishes", async () => {
-  const file = new TFile("note.md");
-  const harness = makeHarness([file]);
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  const initial = "![](oss://vault/a.png)";
-  harness.contents.set(file.path, initial);
-  (harness.plugin.app.vault as any).cachedRead = async () => {
-    const snapshot = initial;
-    await gate;
-    return snapshot;
-  };
-  const prompts: string[][] = [];
-  const watcher = new DeleteWatcher(harness.plugin as never, {} as never);
-  (watcher as any).promptDelete = (keys: string[]) => prompts.push(keys);
-
-  const registering = watcher.register();
-  harness.contents.set(file.path, "");
-  harness.emit("modify", file);
-  release();
-  await registering;
-  // Subsequent reads must observe the changed content.
-  (harness.plugin.app.vault as any).cachedRead = async () => "";
-  await flushTimers();
-
-  assert.deepEqual(prompts, [["vault/a.png"]]);
-});
-
-test("tracks markdown files created after startup", async () => {
+test("startup only registers the explicit file menu and does not read Markdown", () => {
   const harness = makeHarness();
-  const prompts: string[][] = [];
-  const watcher = new DeleteWatcher(harness.plugin as never, {} as never);
-  (watcher as any).promptDelete = (keys: string[]) => prompts.push(keys);
-  await watcher.register();
+  const watcher = harness.watcher();
 
-  const file = new TFile("new.md");
-  harness.contents.set(file.path, "![](oss://vault/new.png)");
-  harness.emit("create", file);
-  await flushTimers();
-  harness.contents.set(file.path, "");
-  harness.emit("modify", file);
-  await flushTimers();
+  watcher.register();
 
-  assert.deepEqual(prompts, [["vault/new.png"]]);
+  assert.equal(typeof harness.getFileMenu(), "function");
+  assert.deepEqual(harness.actions, []);
 });
 
-test("document deletion defaults remote objects to unselected", async () => {
-  const file = new TFile("note.md");
-  const harness = makeHarness([file]);
-  harness.contents.set(file.path, "![](oss://vault/a.png)");
-  const selections: boolean[] = [];
-  const watcher = new DeleteWatcher(harness.plugin as never, {} as never);
-  (watcher as any).promptDelete = (_keys: string[], _path: string, _reason: string, selected: boolean) => {
-    selections.push(selected);
+test("adds the explicit document deletion action only for Markdown files", () => {
+  const harness = makeHarness();
+  harness.watcher().register();
+  const titles: string[] = [];
+  const menu = {
+    addSeparator: () => undefined,
+    addItem: (build: (item: any) => void) => build({
+      setTitle(title: string) { titles.push(title); return this; },
+      setIcon() { return this; },
+      onClick() { return this; },
+    }),
   };
-  await watcher.register();
-  harness.emit("delete", file);
 
-  assert.deepEqual(selections, [false]);
+  harness.getFileMenu()?.(menu, new TFile("note.md"));
+  harness.getFileMenu()?.(menu, new TFile("image.png"));
+
+  assert.deepEqual(titles, ["删除文档并处理 OSS 附件"]);
+});
+
+test("extracts unique real OSS keys and ignores uploading placeholders", () => {
+  assert.deepEqual(collectDocumentOssKeys([
+    "![](oss://vault/a.png)",
+    "![](oss://vault/a.png)",
+    "![](oss:///vault/%E6%8A%A5%E5%91%8A.pdf)",
+    "![](oss://uploading/temp)",
+  ].join("\n")), ["vault/a.png", "vault/报告.pdf"]);
+});
+
+test("moves the document to trash before deleting selected OSS objects", async () => {
+  const harness = makeHarness();
+  const watcher = harness.watcher();
+
+  await (watcher as any).trashDocumentThenDeleteSelected(
+    new TFile("note.md"),
+    ["vault/a.png", "vault/b.pdf"],
+  );
+
+  assert.deepEqual(harness.actions, [
+    "trash:note.md",
+    "remote:vault/a.png",
+    "remote:vault/b.pdf",
+  ]);
+});
+
+test("never deletes remote objects when moving the document to trash fails", async () => {
+  const harness = makeHarness();
+  (harness.plugin.app.fileManager as any).trashFile = async () => { throw new Error("locked"); };
+  const watcher = harness.watcher();
+
+  await (watcher as any).trashDocumentThenDeleteSelected(new TFile("note.md"), ["vault/a.png"]);
+
+  assert.deepEqual(harness.actions, []);
 });
 
 test("remote deletion failure prevents the local reference step", async () => {
@@ -112,8 +114,8 @@ test("remote deletion failure prevents the local reference step", async () => {
   assert.equal(localRemovalCalled, false);
 });
 
-test("remote 404 is treated as deleted so the local reference can be removed", async () => {
+test("remote 404 is treated as a configuration failure and preserves the local reference", async () => {
   const client = { deleteObject: async () => { throw new OssError(404, "", "DELETE", "vault/a.png"); } };
 
-  assert.equal(await deleteRemoteObject(client as never, "vault/a.png"), true);
+  assert.equal(await deleteRemoteObject(client as never, "vault/a.png"), false);
 });

@@ -23,6 +23,12 @@ export class TFile extends TAbstractFile {
   }
 }
 
+export class TFolder extends TAbstractFile {
+  constructor(path: string, public children: TAbstractFile[] = []) {
+    super(path);
+  }
+}
+
 export class App {}
 export class Plugin {}
 export class MarkdownView { file: TFile | null = null; }

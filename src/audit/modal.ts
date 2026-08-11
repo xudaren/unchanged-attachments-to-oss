@@ -1,30 +1,74 @@
 import { App, Modal, Notice, Setting, Vault } from "obsidian";
 import { OssClient, OssError } from "../oss/client";
 import { PendingUpload } from "../types";
-import { AuditReport, isProtectedByAge, reconcileObjects, scanVaultReferences } from "./reconcile";
+import { LifecycleGate, LifecycleQuiescedError } from "../lifecycle";
+import {
+  AuditReport,
+  describeScanFailures,
+  isProtectedByAge,
+  normalizeObjectKey,
+  reconcileObjects,
+  referencesAreComplete,
+  scanVaultReferences,
+  selectFinalDeletionCandidates,
+} from "./reconcile";
 
-interface AuditContext {
+export interface AuditContext {
   app: App;
   vault: Vault;
   client: OssClient;
   prefix: string;
   pendingUploads: Record<string, PendingUpload>;
+  lifecycle?: LifecycleGate;
 }
 
 export async function runObjectAudit(context: AuditContext): Promise<void> {
+  context.lifecycle?.assertActive("核验 OSS 对象引用");
+  if (!context.prefix.replace(/^\/+|\/+$/g, "")) {
+    new Notice("OSS 对象核验已阻止：Object Key 前缀不能为空");
+    return;
+  }
   const notice = new Notice("正在核验 Vault 引用与 OSS 对象…", 0);
   try {
-    const [referenced, objects] = await Promise.all([
-      scanVaultReferences(context.vault),
+    const [scan, objects] = await settlePair([
+      scanVaultReferences(context.vault, {
+        onProgress: ({ scanned, total }) => notice.setMessage(
+          `正在核验 Vault 引用 ${scanned}/${total}…`,
+        ),
+      }),
       context.client.listObjects(context.prefix),
     ]);
+    if (!referencesAreComplete(scan)) {
+      notice.setMessage(`核验中止：${describeScanFailures(scan)}，未生成删除结论`);
+      setTimeout(() => notice.hide(), 8000);
+      return;
+    }
+    context.lifecycle?.assertActive("展示 OSS 核验结果");
     notice.hide();
-    new ObjectAuditModal(
+    let removeQuiesceListener: () => void = () => undefined;
+    const modal = new ObjectAuditModal(
       context.app,
-      reconcileObjects(referenced, objects, context.pendingUploads),
-      async (keys) => deleteAfterRescan(context, keys),
-    ).open();
+      reconcileObjects(scan.referenced, objects, context.pendingUploads),
+      async (keys) => {
+        try {
+          if (context.lifecycle) {
+            await context.lifecycle.run(() => deleteAfterRescan(context, keys));
+          } else {
+            await deleteAfterRescan(context, keys);
+          }
+        } catch (error) {
+          if (!(error instanceof LifecycleQuiescedError)) throw error;
+        }
+      },
+      () => removeQuiesceListener(),
+    );
+    modal.open();
+    removeQuiesceListener = context.lifecycle?.onQuiesce(() => modal.close()) ?? (() => undefined);
   } catch (error) {
+    if (error instanceof LifecycleQuiescedError) {
+      notice.hide();
+      throw error;
+    }
     notice.hide();
     const permissionHint = error instanceof OssError && (error.status === 403 || error.code === "AccessDenied")
       ? "请为当前凭证增加该存储前缀的 ListObjects 权限。"
@@ -35,25 +79,62 @@ export async function runObjectAudit(context: AuditContext): Promise<void> {
 }
 
 async function deleteAfterRescan(context: AuditContext, selectedKeys: string[]): Promise<void> {
-  const latestReferences = await scanVaultReferences(context.vault);
-  const pending = new Set(Object.values(context.pendingUploads).map((item) => item.objectKey));
-  const deletable = selectedKeys.filter((key) => !latestReferences.has(key) && !pending.has(key));
-  const skipped = selectedKeys.length - deletable.length;
+  context.lifecycle?.assertActive("复核待删除 OSS 对象");
+  const notice = new Notice("删除前正在重新扫描 Vault 引用…", 0);
+  const normalizedSelected = new Set(selectedKeys.map(normalizeObjectKey));
+  let latestScan: Awaited<ReturnType<typeof scanVaultReferences>>;
+  let latestObjects: Awaited<ReturnType<OssClient["listObjects"]>>;
+  try {
+    [latestScan, latestObjects] = await settlePair([
+      scanVaultReferences(context.vault, {
+        targetKeys: normalizedSelected,
+        onProgress: ({ scanned, total }) => notice.setMessage(
+          `删除前重新扫描 ${scanned}/${total}…`,
+        ),
+      }),
+      context.client.listObjects(context.prefix),
+    ]);
+  } catch (error) {
+    if (error instanceof LifecycleQuiescedError) throw error;
+    notice.setMessage("已取消删除：无法重新确认 OSS 对象状态");
+    setTimeout(() => notice.hide(), 8000);
+    console.warn("[oss-audit] 删除前复核失败", error);
+    return;
+  }
+  if (!referencesAreComplete(latestScan)) {
+    notice.setMessage(`已取消删除：${describeScanFailures(latestScan)}`);
+    setTimeout(() => notice.hide(), 8000);
+    return;
+  }
+  notice.hide();
+  const selection = selectFinalDeletionCandidates(
+    selectedKeys,
+    latestScan.referenced,
+    context.pendingUploads,
+    latestObjects,
+  );
   let deleted = 0;
   let failed = 0;
-  for (const key of deletable) {
+  for (const key of selection.deletable) {
     try {
+      context.lifecycle?.assertActive("删除核验选中的 OSS 对象");
       await context.client.deleteObject(key);
       deleted++;
     } catch (error) {
-      if (error instanceof OssError && error.status === 404) deleted++;
-      else {
-        failed++;
-        console.warn("[oss-audit] 删除失败", key, error);
-      }
+      if (error instanceof LifecycleQuiescedError) throw error;
+      failed++;
+      console.warn("[oss-audit] 删除失败", key, error);
     }
   }
-  new Notice(`核验清理完成：删除 ${deleted}，跳过 ${skipped}，失败 ${failed}`);
+  new Notice(`核验清理完成：删除 ${deleted}，跳过 ${selection.skipped.length}，失败 ${failed}`);
+}
+
+/** Await both read-only branches so lifecycle drain never leaves an orphan scan behind. */
+async function settlePair<A, B>(tasks: readonly [Promise<A>, Promise<B>]): Promise<[A, B]> {
+  const [first, second] = await Promise.allSettled(tasks);
+  if (first.status === "rejected") throw first.reason;
+  if (second.status === "rejected") throw second.reason;
+  return [first.value, second.value];
 }
 
 class ObjectAuditModal extends Modal {
@@ -63,6 +144,7 @@ class ObjectAuditModal extends Modal {
     app: App,
     private readonly report: AuditReport,
     private readonly onDelete: (keys: string[]) => Promise<void>,
+    private readonly onClosed?: () => void,
   ) {
     super(app);
   }
@@ -95,6 +177,11 @@ class ObjectAuditModal extends Modal {
           await this.onDelete(keys);
         }));
     actions.settingEl.addClass("oss-audit-actions");
+  }
+
+  onClose(): void {
+    this.onClosed?.();
+    this.contentEl.empty();
   }
 
   private renderOrphans(): void {

@@ -16,22 +16,61 @@ export interface PluginSettings {
   pendingUploads: Record<string, PendingUpload>;
 }
 
+export type UploadPhase =
+  | "staged"
+  | "uploading"
+  | "completing"
+  | "uploaded"
+  | "reference_committing"
+  | "cleanup_pending";
+
+/** Storage target captured when a task is created. Access keys may rotate independently. */
+export interface StorageIdentity {
+  region: string;
+  bucketName: string;
+  endpoint: string;
+  objectKeyPrefix: string;
+}
+
+export interface PendingReferenceLocator {
+  kind: "placeholder" | "attachment";
+  sourcePath: string;
+  /** Exact source token captured while planning. */
+  original: string;
+  start: number;
+  end: number;
+  alt: string;
+  before: string;
+  after: string;
+}
+
 export interface PendingUpload {
   tempId: string;
   objectKey: string;
+  /** Empty while a durably staged task has not initiated MultipartUpload yet. */
   uploadId: string;
   ext: string;
   size: number;
   /** 已成功上传的分片：{partNumber, etag} */
   parts: UploadedPart[];
-  /** uploading=分片未完成；uploaded=OSS 已完成，等待引用提交/本地清理 */
-  phase?: "uploading" | "uploaded";
+  /** Durable upload/reference/cleanup state. Missing means legacy `uploading`. */
+  phase?: UploadPhase;
   /** 关联的 md 文件路径（用于失败回写） */
   sourcePath: string;
   /** 同一本地附件的引用实例标识；每个实例独占 Object Key */
   occurrenceId?: string;
   /** 已落地附件路径；用于插件重启后的安全续传 */
   localPath?: string;
+  /** Direct-input durable copy under `.oss-plugin-staging/`. */
+  stagingPath?: string;
+  /** Original semantic file name used when committing Markdown. */
+  displayName?: string;
+  /** Exact placeholder or resolved local-attachment occurrence to commit. */
+  locator?: PendingReferenceLocator;
+  /** Bucket/Endpoint/Region/prefix identity this UploadId belongs to. */
+  storageIdentity?: StorageIdentity;
+  /** Source mtime captured for local attachment identity validation. */
+  sourceMtime?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -42,7 +81,7 @@ export interface UploadedPart {
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
-  region: "oss-cn-hangzhou",
+  region: "cn-hangzhou",
   bucketName: "",
   accessKeyId: "",
   accessKeySecret: "",
@@ -89,13 +128,4 @@ export function isSupportedExt(ext: string): boolean {
 
 export function mimeOf(ext: string): string {
   return ATTACHMENT_MIME[ext.toLowerCase()] ?? "application/octet-stream";
-}
-
-/** md 中占位链接匹配：![](oss://path/to/uuid.ext) */
-export const OSS_URL_REGEX = /!\[[^\]]*\]\(oss:\/\/([^)\s]+)\)/g;
-
-/** 单个 key 的匹配，用于替换 */
-export function extractOssKey(url: string): string | null {
-  const m = url.match(/^oss:\/\/(.+)$/);
-  return m ? m[1] : null;
 }

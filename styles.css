@@ -128,6 +128,20 @@
   vertical-align: top;
 }
 
+/* Dedicated child owned by the plugin; surrounding CodeMirror controls stay intact. */
+.oss-render-slot {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.oss-audio-live-preview-host > .oss-render-slot,
+.oss-pdf-live-preview-host > .oss-render-slot {
+  width: 100%;
+}
+
 .oss-media-caption-host > img,
 .oss-media-caption-host > video,
 .oss-media-caption-host > audio {
@@ -286,6 +300,7 @@
 
 /* Added by the renderer without replacing CodeMirror's editable host nodes. */
 .markdown-source-view .oss-pdf-live-preview-host,
+.markdown-source-view .oss-pdf-live-preview-block,
 .markdown-source-view .oss-pdf-live-preview-line {
   display: block;
   width: 100%;

@@ -20,9 +20,10 @@ export class CredentialVerificationError extends Error {
   }
 }
 
-export class OssError extends Error implements OssErrorDetails {
+export class OssError extends Error {
   readonly code: string;
-  readonly message: string;
+  /** Message returned inside the OSS XML body; Error.message stays actionable. */
+  readonly ossMessage: string;
   readonly requestId: string;
   readonly argumentName: string;
   readonly argumentValue: string;
@@ -37,7 +38,7 @@ export class OssError extends Error implements OssErrorDetails {
     super(`OSS ${method} /${key} → ${status}: ${details.code || details.message || "未知错误"}`);
     this.name = "OssError";
     this.code = details.code;
-    this.message = details.message;
+    this.ossMessage = details.message;
     this.requestId = details.requestId;
     this.argumentName = details.argumentName;
     this.argumentValue = details.argumentValue;
@@ -89,6 +90,8 @@ function formatOssReason(details: OssErrorDetails): string {
       return "凭证有效，但缺少探针 Key 的 oss:GetObject 权限";
     case "NoSuchBucket":
       return "Bucket 不存在，或 Bucket 与 Region/Endpoint 不匹配";
+    case "PublicEndpointForbidden":
+      return "阿里云已阻止当前账号通过中国内地 Bucket 的默认公网 Endpoint 调用数据 API；本插件暂不支持 CNAME，请在首次配置时改用非中国内地 Region（已有引用请勿直接切换存储身份）";
     case "InvalidArgument": {
       const argument = details.argumentName
         ? `（${details.argumentName}${details.argumentValue ? `=${details.argumentValue}` : ""}）`
@@ -121,6 +124,16 @@ function isVerificationError(error: unknown): error is CredentialVerificationErr
 }
 
 function asOssErrorDetails(error: unknown): OssErrorDetails | null {
+  if (error instanceof OssError) {
+    return {
+      status: error.status,
+      code: error.code,
+      message: error.ossMessage,
+      requestId: error.requestId,
+      argumentName: error.argumentName,
+      argumentValue: error.argumentValue,
+    };
+  }
   if (!error || typeof error !== "object") return null;
   const value = error as Partial<OssErrorDetails>;
   if (typeof value.status !== "number" || typeof value.code !== "string") return null;

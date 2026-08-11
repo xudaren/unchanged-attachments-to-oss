@@ -1,8 +1,25 @@
+import type { LeaseUrlResolver, SignedUrlLease } from "./url-resolver";
+import { resolveUrlLease } from "./url-resolver";
+
 export interface PdfRenderer {
-  mount(from: Element, url: string, key: string, displayName?: string): HTMLElement;
+  mount(
+    from: Element,
+    url: string,
+    key: string,
+    displayName?: string,
+    resolver?: LeaseUrlResolver,
+    lease?: SignedUrlLease,
+  ): HTMLElement;
 }
 
-export function buildPdfLink(doc: Document, url: string, key: string, displayName?: string): HTMLElement {
+export function buildPdfLink(
+  doc: Document,
+  url: string,
+  key: string,
+  displayName?: string,
+  resolver?: LeaseUrlResolver,
+  initialLease?: SignedUrlLease,
+): HTMLElement {
   const attachment = doc.createElement("div");
   attachment.className = "oss-pdf-attachment";
   attachment.dataset.ossKey = key;
@@ -31,14 +48,38 @@ export function buildPdfLink(doc: Document, url: string, key: string, displayNam
   open.rel = "noopener noreferrer";
   open.title = `打开 ${name.textContent}`;
   open.textContent = "打开 ↗";
+  if (resolver && typeof open.addEventListener === "function") {
+    let lease = initialLease;
+    const warm = () => {
+      void resolveUrlLease(resolver, key, lease).then((next) => {
+        lease = next;
+        open.href = next.url;
+      });
+    };
+    open.addEventListener("pointerdown", warm);
+    open.addEventListener("focus", warm);
+    open.addEventListener("click", (event) => {
+      event.preventDefault();
+      const popup = doc.defaultView?.open("", "_blank", "noopener,noreferrer") ?? null;
+      void resolveUrlLease(resolver, key, lease).then(
+        (next) => {
+          lease = next;
+          open.href = next.url;
+          if (popup) popup.location.replace(next.url);
+          else doc.defaultView?.open(next.url, "_blank", "noopener,noreferrer");
+        },
+        () => popup?.close(),
+      );
+    });
+  }
 
   attachment.append(badge, details, open);
   return attachment;
 }
 
 export const defaultPdfRenderer: PdfRenderer = {
-  mount(from, url, key, displayName) {
-    return buildPdfLink(from.ownerDocument, url, key, displayName ?? displayNameFromElement(from));
+  mount(from, url, key, displayName, resolver, lease) {
+    return buildPdfLink(from.ownerDocument, url, key, displayName ?? displayNameFromElement(from), resolver, lease);
   },
 };
 

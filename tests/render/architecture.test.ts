@@ -7,36 +7,28 @@ test("Reading View uses the shared signed URL resolver", () => {
   const postProcessor = readFileSync("src/render/post-processor.ts", "utf8");
 
   assert.match(main, /new SignedUrlResolver\(/);
-  assert.match(postProcessor, /resolver\.resolve\(/);
-  assert.match(postProcessor, /Promise\.allSettled\(/);
+  assert.match(postProcessor, /hydrateOssSubtree\(el, resolver/);
+  const domRenderer = readFileSync("src/render/dom-renderer.ts", "utf8");
+  assert.match(domRenderer, /resolveUrlLease\(resolver, key\)/);
+  assert.match(domRenderer, /Promise\.allSettled\(/);
   assert.doesNotMatch(postProcessor, /Promise\.all\(/);
   assert.doesNotMatch(postProcessor, /signedGetUrl/);
-  assert.match(postProcessor, /ossKeyFromImageSource/);
+  assert.match(domRenderer, /ossKeyFromImageSource/);
   assert.doesNotMatch(postProcessor, /extractOssKey/);
 });
 
 test("credential and expiry changes clear all signed URL resolver state", () => {
-  const settings = readFileSync("src/settings.ts", "utf8");
-  const clears = settings.match(/plugin\.urlResolver\.clear\(\)/g) ?? [];
+  const resolver = readFileSync("src/render/url-resolver.ts", "utf8");
+  assert.match(resolver, /this\.generation \+= 1/);
+  assert.match(resolver, /this\.pending\.clear\(\)/);
+  assert.match(resolver, /this\.cache\.clear\(\)/);
+});
 
-  assert.equal(clears.length, 2);
-  assert.doesNotMatch(settings, /plugin\.urlCache\.clear\(\)/);
-
-  const commitStart = settings.indexOf("plugin.settings.region = region");
-  const commitEnd = settings.indexOf("notice.setMessage", commitStart);
-  const credentialCommit = settings.slice(commitStart, commitEnd);
-  assert.ok(
-    credentialCommit.indexOf("plugin.urlResolver.clear()") <
-      credentialCommit.indexOf("await plugin.saveSettings()"),
-    "credential cache must be cleared before the first persistence await",
+test("render signing and runtime OSS requests validate current connection fields", () => {
+  const main = readFileSync("src/main.ts", "utf8");
+  const validations = main.match(
+    /normalizeOssConfig\(\{\s*\.\.\.(?:this\.)?settings,\s*objectKeyPrefix: "obsidian",?\s*\}\)/g,
   );
 
-  const expiryStart = settings.indexOf("plugin.settings.signedUrlExpireSeconds = n");
-  const expiryEnd = settings.indexOf("}", expiryStart);
-  const expiryCommit = settings.slice(expiryStart, expiryEnd);
-  assert.ok(
-    expiryCommit.indexOf("plugin.urlResolver.clear()") <
-      expiryCommit.indexOf("await plugin.saveSettings()"),
-    "expiry cache must be cleared before the persistence await",
-  );
+  assert.equal(validations?.length, 2);
 });

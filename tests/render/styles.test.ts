@@ -28,6 +28,7 @@ test("styles a lightweight full-width PDF attachment card", () => {
   assert.match(css, /\.markdown-source-view \.internal-embed:has\(\.oss-pdf-attachment\)/);
   assert.match(css, /\.markdown-source-view \.cm-line:has\(\.oss-pdf-attachment\)/);
   assert.match(css, /\.markdown-source-view \.oss-pdf-live-preview-host/);
+  assert.match(css, /\.markdown-source-view \.oss-pdf-live-preview-block/);
   assert.match(css, /\.markdown-source-view \.oss-pdf-live-preview-line/);
   assert.match(css, /\.markdown-reading-view \.oss-pdf-attachment/);
   assert.match(css, /\.canvas-node \.oss-pdf-attachment/);
@@ -54,6 +55,7 @@ test("styles Markdown media names below OSS media", () => {
   const css = readFileSync("styles.css", "utf8");
   assert.match(css, /\.oss-media-label/);
   assert.match(css, /\.oss-media-caption-host/);
+  assert.match(css, /\.oss-render-slot/);
   assert.match(css, /text-overflow:\s*ellipsis/);
   assert.match(css, /white-space:\s*nowrap/);
   assert.match(css, /\.oss-audio-live-preview-host/);

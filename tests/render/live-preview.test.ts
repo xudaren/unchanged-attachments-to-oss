@@ -12,13 +12,22 @@ test("uses one incremental observer for Live Preview and Canvas", () => {
   );
   assert.match(source, /new MutationObserver\(\(records\)/);
   assert.match(source, /selectMutationRoots\(records\)/);
-  assert.match(source, /hydrateOssSubtree\(root, this\.urlResolver, undefined, this\.attachmentContextMenu\)/);
+  assert.match(
+    source,
+    /hydrateOssSubtree\([\s\S]*?root,[\s\S]*?this\.urlResolver,[\s\S]*?this\.attachmentContextMenu,[\s\S]*?this\.renderLifetime/,
+  );
   assert.match(source, /renderObserver\.observe\(this\.app\.workspace\.containerEl/);
   assert.match(source, /attributeFilter:\s*\["src", "href"\]/);
-  assert.match(source, /let renderDisposed = false/);
-  assert.match(source, /if \(renderDisposed\) return/);
-  assert.match(source, /renderDisposed = true;[\s\S]*?renderObserver\?\.disconnect\(\)/);
+  assert.match(source, /let layoutDisposed = false/);
+  assert.match(source, /if \(layoutDisposed \|\| !this\.lifecycle\.isActive\) return/);
+  assert.match(source, /layoutDisposed = true;[\s\S]*?renderObserver\?\.disconnect\(\)/);
   assert.match(source, /renderObserver\?\.disconnect\(\)/);
+  assert.match(
+    source,
+    /renderObserver\?\.disconnect\(\);[\s\S]*?this\.urlResolver\.dispose\(\);[\s\S]*?this\.renderLifetime\.dispose\(\);[\s\S]*?disposeOssRenderSessions\(this\.app\.workspace\.containerEl, this\.attachmentContextMenu\);[\s\S]*?this\.attachmentContextMenu\.dispose\(\);[\s\S]*?disconnectMediaLoading\(\)/,
+  );
+  assert.match(source, /disposeRemovedOssRenderSessions\(records, this\.attachmentContextMenu\)/);
+  assert.match(source, /createOssPostProcessor\([\s\S]*?this\.renderLifetime/);
 });
 
 test("does not rescan the whole document inside mutation callbacks", () => {
@@ -28,4 +37,11 @@ test("does not rescan the whole document inside mutation callbacks", () => {
   assert.ok(callback, "MutationObserver callback not found");
   assert.doesNotMatch(callback[1], /hydrateOssSubtree\(document/);
   assert.doesNotMatch(callback[1], /querySelectorAll/);
+});
+
+test("mounts fallback media in a plugin slot without replacing the editable host children", () => {
+  const source = readFileSync("src/render/dom-renderer.ts", "utf8");
+  assert.match(source, /oss-render-slot/);
+  assert.match(source, /host\.appendChild\(slot\)/);
+  assert.doesNotMatch(source, /element\.replaceChildren\(replacement\)|host\.replaceChildren\(/);
 });

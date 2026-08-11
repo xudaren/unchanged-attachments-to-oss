@@ -5,6 +5,9 @@ rmSync(".test-dist", { recursive: true, force: true });
 
 await esbuild.build({
   entryPoints: [
+    "tests/lifecycle.test.ts",
+    "tests/config.test.ts",
+    "tests/reference/codec.test.ts",
     "tests/oss/errors.test.ts",
     "tests/oss/client.test.ts",
     "tests/oss/signer.test.ts",
@@ -20,6 +23,7 @@ await esbuild.build({
     "tests/render/context-menu.test.ts",
     "tests/upload/links.test.ts",
     "tests/upload/interceptor.test.ts",
+    "tests/upload/indicator.test.ts",
     "tests/upload/manager.test.ts",
     "tests/upload/types.test.ts",
     "tests/delete/watcher.test.ts",

@@ -20,6 +20,7 @@ function image(source: string) {
       errorMarker = marker;
       return marker;
     },
+    closest: () => null,
     getAttribute: (name: string) => attributes.get(name) ?? null,
     setAttribute: (name: string, value: string) => attributes.set(name, value),
     removeAttribute: (name: string) => attributes.delete(name),
@@ -39,7 +40,7 @@ test("Reading View hydrates successful nodes when a sibling signature fails", as
   const bad = image("oss://vault/bad.jpg");
   const root = {
     closest: () => null,
-    querySelectorAll: (selector: string) => selector === "img" ? [good, bad] : [],
+    querySelectorAll: (selector: string) => selector.includes('img[src^="oss://"]') ? [good, bad] : [],
   } as unknown as HTMLElement;
   const settings = {
     bucketName: "bucket",
@@ -64,7 +65,7 @@ test("Reading View processor leaves Canvas nodes to the incremental observer", a
   const canvasImage = image("oss://vault/canvas.jpg");
   const root = {
     closest: () => ({} as Element),
-    querySelectorAll: (selector: string) => selector === "img" ? [canvasImage] : [],
+    querySelectorAll: (selector: string) => selector.includes('img[src^="oss://"]') ? [canvasImage] : [],
   } as unknown as HTMLElement;
   let resolutions = 0;
   const resolver = {
@@ -90,7 +91,7 @@ test("Reading View does not attach an old batch error to a reused node", async (
   let releaseSlow!: (url: string) => void;
   const root = {
     closest: () => null,
-    querySelectorAll: (selector: string) => selector === "img" ? [reused, slow] : [],
+    querySelectorAll: (selector: string) => selector.includes('img[src^="oss://"]') ? [reused, slow] : [],
   } as unknown as HTMLElement;
   const resolver = {
     resolve: (key: string) => {
@@ -118,9 +119,15 @@ test("Reading View replaces a PDF placeholder with the shared browser link", asy
   pdf.replaceWith = (replacement: unknown) => { pdf.replacement = replacement; };
   const root = {
     closest: () => null,
-    querySelectorAll: (selector: string) => selector === "img" ? [pdf] : [],
+    querySelectorAll: (selector: string) => selector.includes('img[src^="oss://"]') ? [pdf] : [],
   } as unknown as HTMLElement;
-  const host = { className: "oss-pdf-viewer" };
+  const host = {
+    tagName: "DIV",
+    className: "oss-pdf-viewer",
+    dataset: {} as Record<string, string>,
+    getAttribute: () => null,
+    closest: () => null,
+  };
   let displayName: string | undefined;
 
   await createOssPostProcessor({
