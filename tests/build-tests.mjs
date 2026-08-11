@@ -7,6 +7,8 @@ await esbuild.build({
   entryPoints: [
     "tests/lifecycle.test.ts",
     "tests/config.test.ts",
+    "tests/credentials.test.ts",
+    "tests/persistence.test.ts",
     "tests/reference/codec.test.ts",
     "tests/oss/errors.test.ts",
     "tests/oss/client.test.ts",

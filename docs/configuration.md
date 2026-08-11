@@ -2,7 +2,7 @@
 
 # 是什么
 
-提供 OSS 连接、存储位置、签名有效期和自动上传状态的配置与保存入口。
+提供 OSS 连接、存储位置、签名有效期、主密码加密和自动上传状态的配置与保存入口。
 
 # 为什么
 
@@ -12,7 +12,11 @@
 
 ## 流程
 
-用户在设置页填写：`region`（V4 签名地域，如 `cn-hangzhou`；兼容输入旧格式 `oss-cn-hangzhou` 并归一化）、`bucketName`、`accessKeyId`、`accessKeySecret`、`endpoint`（可选且只允许 hostname）、`objectKeyPrefix`（默认 vault 名且禁止为空）、`signedUrlExpireSeconds`（默认 3600，范围 `61..604800`）、`autoUpload`（默认 true）。保存前必须通过 V4 凭证校验，禁止持久化无效凭证。当前配置明文存 `data.json`。
+用户在设置页填写：`region`（V4 签名地域，如 `cn-hangzhou`；兼容输入旧格式 `oss-cn-hangzhou` 并归一化）、`bucketName`、`accessKeyId`、`accessKeySecret`、`endpoint`（可选且只允许 hostname）、`objectKeyPrefix`（默认 vault 名且禁止为空）、`signedUrlExpireSeconds`（默认 3600，范围 `61..604800`）、`autoUpload`（默认 true）和主密码。保存前必须通过 V4 凭证校验，禁止持久化无效凭证。
+
+AK/SK 使用 Web Crypto `PBKDF2-SHA256` 从主密码与随机 salt 派生不可导出的 AES-256 密钥，再以 `AES-GCM` 和随机 96-bit IV 加密。`data.json` 只保存带版本的密文、salt、IV、迭代次数和非敏感配置；禁止保存主密码、派生密钥与明文 AK/SK。插件每次加载后保持锁定，并在布局就绪后主动展示主密码解锁弹窗；用户关闭弹窗时保持锁定，可稍后从设置页解锁。解密后的凭证和派生密钥只存在于当前插件实例内存，卸载或热重载时丢弃。密码错误必须保持锁定且禁止 OSS 请求。
+
+旧版明文配置只允许作为一次性迁移输入留在内存；插件必须在启动后主动展示设置主密码的迁移弹窗。用户设置主密码、OSS 校验与密文持久化全部成功后，必须从下一份 `data.json` 中移除明文字段。任一步失败都不得覆盖原持久化配置。忘记主密码时无法解密，只能重新填写 AK/SK 并建立新密文；插件禁止提供可绕过主密码的恢复路径。
 
 保存时插件用已填凭证对 `{objectKeyPrefix}/.oss-plugin-probe/{randomUUID}` 发送签名 GET。随机 Key 不应存在，因此 `404 NoSuchKey` 是预期成功。`objectKeyPrefix` 禁止以 `/` 开头，首段禁止为占位命名 `uploading`，任一段禁止为内部探针命名 `.oss-plugin-probe` 或 URL 点路径 `.` / `..`。禁止用 ListObjects 作为凭证探针，避免要求枚举 Bucket 对象名称的权限。其他响应均 Notice 报错并阻止保存。`autoUpload` 变为 false 时，新拦截与 `vault.on('create')` 补传立即跳过，已开始的自动任务在下一次 Initiate/Part/Complete 前安全暂停并保留恢复状态；已有 `oss://` 链接的渲染和显式删除不受影响。
 

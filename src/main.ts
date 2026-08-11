@@ -37,6 +37,16 @@ import { OssAttachmentContextMenu } from "./render/context-menu";
 import { disconnectMediaLoading } from "./render/media-loading";
 import { runObjectAudit } from "./audit/modal";
 import { LifecycleQuiescedError, PluginLifecycle } from "./lifecycle";
+import {
+  decryptCredentials,
+  encryptCredentials,
+  EncryptedCredentials,
+  credentialPromptMode,
+  isEncryptedCredentials,
+  reencryptCredentials,
+} from "./credentials";
+import { createPersistedSettingsSnapshot } from "./persistence";
+import { CredentialStartupModal } from "./credential-modal";
 
 export default class OssPlugin extends Plugin {
   settings!: PluginSettings;
@@ -53,12 +63,16 @@ export default class OssPlugin extends Plugin {
   private deleteWatcher!: DeleteWatcher;
   private renderLifetime!: RenderSessionLifetime;
   private unloading = false;
+  private credentialKey: CryptoKey | null = null;
+  private legacyPlaintextLoaded = false;
+  private credentialStartupModal: CredentialStartupModal | null = null;
 
   async onload(): Promise<void> {
     // Register before the first await: this instance can itself be disabled
     // while waiting for an older hot-reload generation to drain.
     this.register(() => {
       this.unloading = true;
+      this.clearRuntimeCredentials();
       this.lifecycle?.quiesce();
     });
     this.lifecycle = await PluginLifecycle.activate(this.manifest.id);
@@ -216,6 +230,15 @@ export default class OssPlugin extends Plugin {
 
     this.addSettingTab(new OssSettingTab(this.app, this));
 
+    this.app.workspace.onLayoutReady(() => {
+      if (!this.lifecycle.isActive) return;
+      this.openCredentialStartupPrompt();
+    });
+    this.register(() => {
+      this.credentialStartupModal?.close();
+      this.credentialStartupModal = null;
+    });
+
     this.addCommand({
       id: "test-oss-connection",
       name: "测试 OSS 连接",
@@ -298,12 +321,16 @@ export default class OssPlugin extends Plugin {
 
   onunload(): void {
     this.unloading = true;
+    this.clearRuntimeCredentials();
     this.lifecycle?.quiesce();
     void this.lifecycle?.drain();
   }
 
   async loadSettings(): Promise<void> {
     const raw = (await this.loadData()) as Partial<PluginSettings> | null;
+    this.legacyPlaintextLoaded = !raw?.encryptedCredentials && Boolean(
+      raw?.accessKeyId || raw?.accessKeySecret,
+    );
     this.settings = { ...DEFAULT_SETTINGS, ...(raw ?? {}) };
     // 清理旧版已废弃的配置。
     const legacy = this.settings as unknown as Record<string, unknown>;
@@ -348,6 +375,17 @@ export default class OssPlugin extends Plugin {
     } catch {
       // Keep incomplete/invalid drafts editable in the setting tab.
     }
+    const encrypted = raw?.encryptedCredentials;
+    if (encrypted !== undefined && !isEncryptedCredentials(encrypted)) {
+      this.settings.encryptedCredentials = encrypted as EncryptedCredentials;
+      this.settings.accessKeyId = "";
+      this.settings.accessKeySecret = "";
+    } else if (encrypted) {
+      this.settings.encryptedCredentials = encrypted;
+      // A synced ciphertext always wins over any stale legacy plaintext fields.
+      this.settings.accessKeyId = "";
+      this.settings.accessKeySecret = "";
+    }
     const accessKeyId = String(this.settings.accessKeyId ?? "").trim();
     const accessKeySecret = String(this.settings.accessKeySecret ?? "").trim();
     if (accessKeyId !== this.settings.accessKeyId) {
@@ -374,12 +412,14 @@ export default class OssPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
-    const snapshot = JSON.parse(JSON.stringify(this.settings)) as PluginSettings;
+    // This is the final persistence boundary. Legacy plaintext is preserved only
+    // until its verified encrypted replacement is durably written.
+    const snapshot = createPersistedSettingsSnapshot(this.settings, this.legacyPlaintextLoaded);
     await this.lifecycle.enqueuePersistence(() => this.saveData(snapshot));
   }
 
   /** Atomically switch every runtime consumer after a verified configuration change. */
-  async applyVerifiedConfig(config: NormalizedOssConfig): Promise<void> {
+  async applyVerifiedConfig(config: NormalizedOssConfig, masterPassword?: string): Promise<void> {
     this.lifecycle.assertActive("保存配置");
     const currentIdentity = establishedStorageIdentityKey(this.settings);
     if (currentIdentity && currentIdentity !== storageIdentityKey(config)) {
@@ -398,13 +438,98 @@ export default class OssPlugin extends Plugin {
       objectKeyPrefix: this.settings.objectKeyPrefix,
       signedUrlExpireSeconds: this.settings.signedUrlExpireSeconds,
     };
+    const previousEncrypted = this.settings.encryptedCredentials;
+    const previousKey = this.credentialKey;
+    const previousLegacyState = this.legacyPlaintextLoaded;
+    let encrypted: EncryptedCredentials;
+    let nextKey = this.credentialKey;
+    if (nextKey && previousEncrypted) {
+      encrypted = await reencryptCredentials(config, nextKey, previousEncrypted);
+    } else {
+      if (!masterPassword) throw new Error("请设置主密码后再保存凭证");
+      const created = await encryptCredentials(config, masterPassword);
+      encrypted = created.encrypted;
+      nextKey = created.key;
+    }
+    this.settings.encryptedCredentials = encrypted;
+    this.credentialKey = nextKey;
+    this.legacyPlaintextLoaded = false;
     this.installRuntimeConfig(config);
     try {
       await this.saveSettings();
     } catch (error) {
+      this.settings.encryptedCredentials = previousEncrypted;
+      this.credentialKey = previousKey;
+      this.legacyPlaintextLoaded = previousLegacyState;
       this.installRuntimeConfig(previous);
       throw error;
     }
+  }
+
+  hasEncryptedCredentials(): boolean {
+    return this.settings.encryptedCredentials !== undefined;
+  }
+
+  isCredentialsLocked(): boolean {
+    return this.hasEncryptedCredentials() && this.credentialKey === null;
+  }
+
+  needsCredentialEncryption(): boolean {
+    return !this.hasEncryptedCredentials() && Boolean(
+      this.settings.accessKeyId || this.settings.accessKeySecret,
+    );
+  }
+
+  async unlockCredentials(masterPassword: string): Promise<void> {
+    this.lifecycle.assertActive("解锁 OSS 凭证");
+    const encrypted = this.settings.encryptedCredentials;
+    if (!encrypted) throw new Error("当前没有可解锁的加密凭证");
+    const unlocked = await decryptCredentials(encrypted, masterPassword);
+    this.lifecycle.assertActive("应用已解锁 OSS 凭证");
+    const config = normalizeOssConfig({ ...this.settings, ...unlocked.credentials });
+    this.credentialKey = unlocked.key;
+    this.installRuntimeConfig(config);
+  }
+
+  async migrateLegacyCredentials(masterPassword: string): Promise<void> {
+    this.lifecycle.assertActive("迁移旧版 OSS 凭证");
+    if (!this.needsCredentialEncryption()) throw new Error("没有需要迁移的旧版明文凭证");
+    const config = normalizeOssConfig(this.settings);
+    await this.client.verifyCredentials();
+    this.lifecycle.assertActive("加密旧版 OSS 凭证");
+    await this.applyVerifiedConfig(config, masterPassword);
+  }
+
+  lockCredentials(): void {
+    if (!this.settings.encryptedCredentials) return;
+    this.clearRuntimeCredentials();
+    this.installRuntimeConfig({
+      ...this.settings,
+      accessKeyId: "",
+      accessKeySecret: "",
+    });
+  }
+
+  private openCredentialStartupPrompt(): void {
+    if (this.credentialStartupModal) return;
+    const mode = credentialPromptMode({
+      hasEncryptedCredentials: this.hasEncryptedCredentials(),
+      hasRuntimeCredentials: Boolean(this.settings.accessKeyId || this.settings.accessKeySecret),
+      isUnlocked: !this.isCredentialsLocked(),
+    });
+    if (!mode) return;
+    const modal = new CredentialStartupModal(
+      this.app,
+      mode,
+      (password) => this.lifecycle.run(() => mode === "unlock"
+        ? this.unlockCredentials(password)
+        : this.migrateLegacyCredentials(password)),
+      () => {
+        if (this.credentialStartupModal === modal) this.credentialStartupModal = null;
+      },
+    );
+    this.credentialStartupModal = modal;
+    modal.open();
   }
 
   async retryPendingUploads(): Promise<void> {
@@ -474,6 +599,14 @@ export default class OssPlugin extends Plugin {
       undefined,
       this.attachmentContextMenu,
     ).catch((error) => console.warn("[oss-render] 配置切换后刷新附件失败", error));
+  }
+
+  private clearRuntimeCredentials(): void {
+    this.credentialKey = null;
+    if (!this.settings) return;
+    this.settings.accessKeyId = "";
+    this.settings.accessKeySecret = "";
+    clearHmacKeyCache();
   }
 
   private requireConfigured(): boolean {

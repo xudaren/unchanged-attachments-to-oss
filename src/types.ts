@@ -1,9 +1,13 @@
-/** 插件持久化配置。全部明文存 data.json。 */
+import type { EncryptedCredentials } from "./credentials";
+
+/** 插件运行时配置；saveSettings 会剔除 AK/SK 明文后再持久化。 */
 export interface PluginSettings {
   region: string;
   bucketName: string;
   accessKeyId: string;
   accessKeySecret: string;
+  /** Vault 中唯一允许持久化的凭证形态。AK/SK 明文仅驻留运行时内存。 */
+  encryptedCredentials?: EncryptedCredentials;
   /** 可选：自定义 endpoint（不填则由 region 拼出 oss-{region}.aliyuncs.com） */
   endpoint: string;
   /** 存储路径前缀，默认 vault 名 */

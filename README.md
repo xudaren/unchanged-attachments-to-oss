@@ -6,6 +6,7 @@
 
 - **自动上传**：粘贴、拖入附件自动上传到 OSS，无需手动操作
 - **V4 动态签名**：私有 Bucket 安全访问，签名 URL 自动缓存并在使用前续期
+- **加密凭证同步**：AK/SK 经主密码派生密钥和 AES-GCM 加密后随 Vault 同步，主密码不落盘
 - **多端兼容**：PC（Windows/macOS）+ 移动端（iOS/Android）均可使用
 - **断点续传**：网络、超时和 OSS 5xx 中断会保留本地 staging 与分片状态，可从任务入口恢复
 - **显式删除**：附件右键菜单和文档文件菜单提供联动删除，原生删除不会静默操作 OSS
@@ -67,6 +68,8 @@ npm run dev   # 监听模式，修改后自动重新构建
 | `autoUpload` | 否 | 自动上传开关，默认开启 |
 
 保存时会通过标准 OSS Endpoint 和 Signature V4 访问每次随机的不存在探针 Key，以 `404 NoSuchKey` 验证 Bucket、凭证和 `oss:GetObject` 权限。探针不会列举 Bucket、创建对象或下载真实内容。校验失败会阻止保存，并区分提示凭证、权限、Bucket/Region、请求参数或网络问题。
+
+首次保存还需设置至少 10 个字符的主密码。插件使用 Web Crypto `PBKDF2-SHA256` 派生不可导出的 AES-256 密钥，并以 `AES-GCM` 加密 AK/SK；Vault 中只同步密文、随机 salt/IV 和算法参数。插件每次加载或热重载后保持锁定，需要在设置页输入主密码解锁。主密码忘记后无法恢复原凭证，只能重新填写 AK/SK 并生成新密文。
 
 Bucket、Region、Endpoint 与 Object Key 前缀共同组成存储身份；前缀中的空格也是 Object Key 的真实内容，不会被插件静默裁剪。首次配置后可轮换 AK/SK 或调整签名有效期；当前版本会阻止直接切换存储身份，因为历史 `oss://` 引用不携带 Bucket，静默切换会让旧附件全部失效。
 

@@ -24,6 +24,8 @@ interface CredentialDraft {
 
 export class OssSettingTab extends PluginSettingTab {
   private draft!: CredentialDraft;
+  private masterPassword = "";
+  private masterPasswordConfirmation = "";
 
   constructor(app: App, private readonly plugin: OssPlugin) {
     super(app, plugin);
@@ -46,9 +48,44 @@ export class OssSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "阿里云 OSS 配置" });
     containerEl.createEl("p", {
-      text: "私有 Bucket + 客户端 Signature V4。AK/SK 当前明文保存在 data.json，仅限个人使用。",
+      text: "私有 Bucket + 客户端 Signature V4。AK/SK 使用主密码加密后随 Vault 同步，主密码只用于当前运行期解锁。",
       cls: "setting-item-description",
     });
+
+    if (plugin.isCredentialsLocked()) {
+      const unlock = new Setting(containerEl)
+        .setName("凭证已锁定")
+        .setDesc("输入主密码解锁本次运行；主密码不会保存");
+      unlock.addText((text) => {
+        text.inputEl.type = "password";
+        text.setPlaceholder("主密码").onChange((value) => { this.masterPassword = value; });
+      });
+      unlock.addButton((button) => button.setButtonText("解锁").setCta().onClick(async () => {
+        await this.runWhileActive(async () => {
+          try {
+            await plugin.unlockCredentials(this.masterPassword);
+            this.masterPassword = "";
+            new Notice("OSS 凭证已解锁");
+            this.display();
+          } catch (error) {
+            new Notice(error instanceof Error ? error.message : String(error));
+          }
+        });
+      }));
+    } else if (plugin.hasEncryptedCredentials()) {
+      new Setting(containerEl)
+        .setName("凭证已解锁")
+        .setDesc("解密后的 AK/SK 和派生密钥只存在于当前插件实例内存")
+        .addButton((button) => button.setButtonText("立即锁定").onClick(() => {
+          plugin.lockCredentials();
+          this.display();
+        }));
+    } else if (plugin.needsCredentialEncryption()) {
+      containerEl.createEl("p", {
+        text: "检测到旧版明文凭证。设置主密码并保存校验成功后，将自动迁移为密文。",
+        cls: "setting-item-description mod-warning",
+      });
+    }
 
     new Setting(containerEl)
       .setName("自动上传")
@@ -114,6 +151,26 @@ export class OssSettingTab extends PluginSettingTab {
           this.draft.accessKeySecret = v.trim();
         });
       });
+
+    if (!plugin.hasEncryptedCredentials() || plugin.isCredentialsLocked()) {
+      new Setting(containerEl)
+        .setName(plugin.isCredentialsLocked() ? "新主密码" : "主密码")
+        .setDesc(plugin.isCredentialsLocked()
+          ? "仅在忘记原主密码、准备使用新 AK/SK 覆盖旧密文时填写"
+          : "至少 10 个字符；不会保存，忘记后只能重新填写 AK/SK")
+        .addText((text) => {
+          text.inputEl.type = "password";
+          text.setValue(this.masterPassword).onChange((value) => { this.masterPassword = value; });
+        });
+      new Setting(containerEl)
+        .setName("确认主密码")
+        .addText((text) => {
+          text.inputEl.type = "password";
+          text.setValue(this.masterPasswordConfirmation).onChange((value) => {
+            this.masterPasswordConfirmation = value;
+          });
+        });
+    }
 
     new Setting(containerEl)
       .setName("Endpoint（可选）")
@@ -222,6 +279,11 @@ export class OssSettingTab extends PluginSettingTab {
   private async saveCredentialsWithVerification(): Promise<void> {
     const { plugin } = this;
     plugin.lifecycle.assertActive("校验并保存 OSS 配置");
+    const needsPassword = !plugin.hasEncryptedCredentials() || plugin.isCredentialsLocked();
+    if (needsPassword && this.masterPassword !== this.masterPasswordConfirmation) {
+      new Notice("两次输入的主密码不一致");
+      return;
+    }
     let normalized;
     try {
       const expiry = Number(this.draft.signedUrlExpireSeconds);
@@ -267,7 +329,9 @@ export class OssSettingTab extends PluginSettingTab {
     }
     try {
       plugin.lifecycle.assertActive("应用已校验 OSS 配置");
-      await plugin.applyVerifiedConfig(normalized);
+      await plugin.applyVerifiedConfig(normalized, needsPassword ? this.masterPassword : undefined);
+      this.masterPassword = "";
+      this.masterPasswordConfirmation = "";
       this.draft = {
         ...normalized,
         signedUrlExpireSeconds: String(normalized.signedUrlExpireSeconds),
