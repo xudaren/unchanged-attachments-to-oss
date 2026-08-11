@@ -3,6 +3,7 @@ import test from "node:test";
 import type { AttachmentContextMenuBinder } from "../../src/render/context-menu";
 import { RenderSessionLifetime } from "../../src/render/lifetime";
 import {
+  disposeRemovedOssRenderSessions,
   disposeOssRenderSessions,
   hydrateOssSubtree,
   resetOssRenderLifetime,
@@ -59,6 +60,21 @@ test("deduplicates mutation roots within one observer batch", () => {
   assert.deepEqual(
     selectMutationRoots([record("attributes", image), record("attributes", image)]),
     [image],
+  );
+});
+
+test("collapses overlapping Canvas mutation roots to one outer subtree scan", () => {
+  const child = node(1, "IMG") as Node & { parentNode: Node | null };
+  const outer = node(1, "DIV");
+  child.parentNode = outer;
+  const surface = node(1, "SECTION");
+
+  assert.deepEqual(
+    selectMutationRoots([
+      record("childList", surface, [outer]),
+      record("childList", outer, [child]),
+    ]),
+    [outer],
   );
 });
 
@@ -714,4 +730,27 @@ test("configuration reset re-signs detached sessions through the shared lifetime
 
   assert.equal(first.src, "https://new.example/vault/first.jpg");
   assert.equal(second.src, "https://new.example/vault/second.jpg");
+});
+
+test("removed-node cleanup ignores Canvas media that was only moved", async () => {
+  const image = mediaElement("IMG", "oss://vault/canvas.jpg") as ReturnType<typeof mediaElement> & {
+    isConnected: boolean;
+  };
+  image.isConnected = true;
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => "https://signed.example/vault/canvas.jpg",
+  });
+
+  const removal = {
+    type: "childList",
+    removedNodes: [image],
+  } as unknown as MutationRecord;
+  disposeRemovedOssRenderSessions([removal]);
+  assert.equal(image.src, "https://signed.example/vault/canvas.jpg");
+  assert.equal(image.dataset.ossRenderKey, "vault/canvas.jpg");
+
+  image.isConnected = false;
+  disposeRemovedOssRenderSessions([removal]);
+  assert.equal(image.src, "oss:///vault/canvas.jpg");
+  assert.equal(image.dataset.ossRenderKey, undefined);
 });

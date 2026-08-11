@@ -64,7 +64,19 @@ export function selectMutationRoots(records: readonly MutationRecord[]): ParentN
       for (const surface of findRenderSurfaces(node as ParentNode)) roots.add(surface);
     }
   }
-  return Array.from(roots);
+  const candidates = Array.from(roots);
+  // Canvas often reports both a newly added node subtree and many descendants
+  // from the same synchronous layout pass. Scan only the outermost changed root
+  // to keep one observer delivery linear instead of repeatedly walking overlaps.
+  const candidateNodes = new Set<Node>(candidates as Node[]);
+  return candidates.filter((root) => {
+    let ancestor = (root as Node).parentNode;
+    while (ancestor) {
+      if (candidateNodes.has(ancestor)) return false;
+      ancestor = ancestor.parentNode;
+    }
+    return true;
+  });
 }
 
 /** Return only Live Preview and Canvas roots contained in one parent. */
@@ -164,6 +176,10 @@ export function disposeRemovedOssRenderSessions(
     if (record.type !== "childList") continue;
     for (const node of Array.from(record.removedNodes ?? [])) {
       if (node.nodeType !== 1 && node.nodeType !== 11) continue;
+      // Obsidian and our caption renderer frequently move a node by removing it
+      // and appending it elsewhere in the same task. MutationObserver runs after
+      // that move, so a connected node is still live and must not be restored.
+      if (node.isConnected) continue;
       disposeOssRenderSessions(node as ParentNode, contextMenu);
     }
   }

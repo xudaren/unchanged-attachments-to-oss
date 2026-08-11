@@ -155,6 +155,7 @@ ListObjects 权限只属于可选核验能力，设置保存时的凭证探针�
 - OSS 对象核验必须完整处理 ListObjectsV2 分页，并以 Object Key 集合差为准；禁止用对象数量相等推断无垃圾，也禁止让核验所需的 ListObjects 权限成为上传和渲染的必需权限。
 - 核验结果中的疑似垃圾默认不选中，最近 24 小时对象必须处于删除保护期；真正删除前必须重新扫描 Vault 引用，禁止删除扫描后恢复引用的对象。
 - MutationObserver 回调必须只处理本批次变更节点和新增子树，禁止调用 `document.querySelectorAll` 或等价的全页扫描，因为 Obsidian 编辑、滚动和拖动 Canvas 会高频修改 DOM。
+- MutationObserver 的 `removedNodes` 只有在回调执行时节点仍未重新连接 DOM，才可释放渲染会话；媒体加标题、Canvas 重排等 `replaceWith → appendChild` 会产生“先移除后重新接入”的移动记录，禁止将其误判成真实删除，否则会形成 `恢复 oss:// → 再渲染 → 再移动` 的死循环。
 - Reading View、Live Preview、Canvas 必须有单一渲染责任方，禁止同一视图由两套渲染器竞争写入 URL；Reading View 归 Post Processor，Live Preview/Canvas 归增量 Observer。
 - OSS 附件右键菜单必须阻止 Obsidian 图片菜单继续冒泡，并且只能对当前 Object Key 和可确认的来源 Markdown 执行操作；禁止因 DOM 外层仍为 `.image-embed` 就展示图片专属操作。
 - 右键菜单移除 OSS 附件时必须遵循“确认联动删除 → 删除 OSS Object → 删除当前 Markdown 引用”的顺序；远端删除失败时禁止修改 Markdown，避免引用先丢失后无法重试远端删除。
