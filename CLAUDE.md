@@ -1,6 +1,10 @@
-> 本文档是项目规范的根入口。Agent 应优先下钻本地关联文档，未找到再搜索网络，不单纯依赖模型预训练数据。
+>当前文档是项目的根入口文档，定义项目全局总览框架信息
+>
+>Agent 接到任务需要查阅内容时优先下钻本地关联的文档，未找到再搜索网络，不单纯依赖模型预训练数据
 
 # 是什么
+
+>描述功能的组成要素和连接关系，每个要素和连接关系附一句话简介。先总后分，层级管理引用文档，可不断下钻。只包含与具体实现技术无关的功能描述
 
 开发一个兼容 PC（Windows、macOS）和移动端（iOS、Android）的 Obsidian 插件，功能包括：
 
@@ -20,6 +24,8 @@
 
 # 为什么
 
+>描述功能的组成要素和连接关系，每个要素和连接关系附一句话简介。先总后分，层级管理引用文档，可不断下钻。只包含与具体实现技术无关的功能描述
+
 - 业务价值：让多端 Obsidian 用户把大体积媒体放在私有 OSS，Vault 只保留稳定、可同步和可编辑的永久引用，减少本地附件与同步压力。
 - 技术价值：V4 动态签名避免持久化临时 URL；durable staging、Multipart journal 与显式删除把网络中断、崩溃和误删从数据损失降为可恢复任务。
 - 成本与风险：插件无服务端，部署简单但 AK/SK 目前明文存在 Vault 插件数据中；用户承担 OSS 存储/流量成本，可选核验还需要 ListObjects 权限。客户端凭证模式只适合个人可信设备，不应分发共享高权限 AK。
@@ -27,7 +33,13 @@
 
 # 怎么样
 
+>描述功能的具体实现。流程、约束、规则中的内容只与「是什么」描述的要素和连接关系相关
+
 ## 流程
+
+>定义要素和连接关系如何运转，引入具体实现技术，是广义的流程
+>
+>推荐使用 Mermaid 流程图或时序图辅助说明复杂流程，保持图表与文字描述一致
 
 ### 配置
 
@@ -117,6 +129,8 @@ ListObjects 权限只属于可选核验能力，设置保存时的凭证探针�
 
 ## 约束
 
+>定义不可突破的边界和验收条件，使用 "禁止 XXX" 或 "必须 XXX" 句式
+
 - 必须只用 `requestUrl` 收发 HTTP，禁止使用 `fetch/XHR/ali-oss` SDK，因为要兼容移动端且绕 CORS。
 - 必须只用 Web Crypto (`crypto.subtle`) 做签名，禁止使用 Node `crypto/fs/stream/Buffer`。
 - 必须处理的附件类型：图片(png/jpg/jpeg/gif/webp/avif/svg/bmp)、视频(mp4/mov/webm/mkv/ogv/m4v)、音频(mp3/wav/m4a/ogg/flac/aac/opus)、PDF；其他类型必须不动。
@@ -138,12 +152,17 @@ ListObjects 权限只属于可选核验能力，设置保存时的凭证探针�
 - 粘贴/拖拽拦截必须在事件句柄失效前并发快照所有已接管 `File` 的字节，后续上传与失败回写必须共用稳定 Blob，禁止在长时间异步上传后再读取可能已被系统撤销的原始 `File` 句柄。
 - 输入附件读取返回 `NotReadableError` 或 `The requested file could not be read` 时，Notice 必须通用地提示“文件可能仅存在云盘（如 iCloud、OneDrive 等），请先下载到本地后重试”，禁止绑定单一云盘品牌或只暴露浏览器原始英文异常。
 
-## 工作规则
+
+## 规则
+
+>定义最佳实践，使用 "推荐 XXX，因为 YYY" 句式
+
+### 工作规则
 
 - 每次代码实现完成并通过验证后，默认执行 `npm run deploy:test` 部署到 `/Users/xukai/xukai_workspace/许凯测试oss插件/.obsidian/plugins/unchanged-attachments-to-oss`，方便用户立即验证；部署只更新 `main.js`、`manifest.json`、`styles.css`，禁止覆盖测试 Vault 中的 `data.json`。
 - 语言简洁凝练，避免重复规范，节省 token。
 
-## 默认实现参数
+### 默认实现参数
 
 - 推荐优先在 `editor-paste/editor-drop` 阶段拦截 blob 直传，因为可避免本地落盘再删的往返。
 - 推荐分片固定 4 MB 并用 `Blob.slice` 惰性切片，因为可兼顾移动端内存与 RTT 数量。
