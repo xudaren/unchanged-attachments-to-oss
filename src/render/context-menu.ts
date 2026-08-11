@@ -186,11 +186,11 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
         if (this.active) void copyText(formatOssReference(data.key), "已复制 OSS Markdown 引用");
       }));
 
-    const sourcePath = data.sourcePath || null;
+    const sourcePath = this.resolveSourcePath(element, data.sourcePath);
     if (sourcePath) {
       menu.addSeparator();
       menu.addItem((item) => item
-        .setTitle(`移除${label}引用`)
+        .setTitle(`删除${label}…`)
         .setIcon("trash-2")
         .onClick(() => {
           if (this.active) void this.removeReference(sourcePath, data.key, label);
@@ -201,6 +201,23 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
       return;
     }
     menu.showAtMouseEvent(event);
+  }
+
+  /** Resolve Live Preview ownership by DOM containment instead of guessing from the active view. */
+  private resolveSourcePath(element: HTMLElement, boundSourcePath?: string): string | null {
+    if (boundSourcePath) return boundSourcePath;
+    const leaves = this.plugin.app.workspace.getLeavesOfType("markdown") as unknown as Array<{
+      view?: { containerEl?: HTMLElement; file?: TFile | null };
+    }>;
+    const paths = new Set<string>();
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      const file = view?.file;
+      if (file instanceof TFile && file.extension === "md" && view?.containerEl?.contains(element)) {
+        paths.add(file.path);
+      }
+    }
+    return paths.size === 1 ? [...paths][0] : null;
   }
 
   private getResolver(): LeaseUrlResolver {

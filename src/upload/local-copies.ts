@@ -1,4 +1,4 @@
-import { Modal, Notice, Setting, TFile, TFolder, Vault } from "obsidian";
+import { Modal, Notice, Setting, Vault } from "obsidian";
 import { LifecycleGate } from "../lifecycle";
 import { PendingUpload } from "../types";
 import { formatAttachmentSize, isInternalStagingPath, STAGING_DIR } from "./input";
@@ -25,28 +25,34 @@ export interface LocalCopyActions {
   remove(path: string): Promise<void>;
 }
 
-export function scanLocalInsuranceCopies(
+export async function scanLocalInsuranceCopies(
   vault: Vault,
   pendingUploads: Record<string, PendingUpload>,
-): LocalInsuranceCopyReport {
-  const folder = vault.getAbstractFileByPath(STAGING_DIR);
+): Promise<LocalInsuranceCopyReport> {
   const claims = claimedCopies(pendingUploads);
-  const copies = folder instanceof TFolder
-    ? folder.children
-      .filter((child): child is TFile => child instanceof TFile)
-      .map((file) => {
-        const pending = claims.get(file.path);
-        return {
-          path: file.path,
-          name: pending?.displayName || readableCopyName(file.name),
-          size: file.stat.size,
-          modifiedAt: file.stat.mtime,
-          taskId: pending?.tempId,
-          taskStatus: pending ? describeTaskStatus(pending) : undefined,
-        };
-      })
-      .sort((left, right) => right.modifiedAt - left.modifiedAt)
-    : [];
+  let paths: string[] = [];
+  try {
+    paths = (await vault.adapter.list(STAGING_DIR)).files;
+  } catch {
+    // The staging directory is optional until the first intercepted upload.
+  }
+  const entries: Array<LocalInsuranceCopy | null> = await Promise.all(paths.map(async (path) => {
+    const stat = await vault.adapter.stat(path);
+    if (!stat || stat.type !== "file") return null;
+    const pending = claims.get(path);
+    const fileName = path.slice(path.lastIndexOf("/") + 1);
+    return {
+      path,
+      name: pending?.displayName || readableCopyName(fileName),
+      size: stat.size,
+      modifiedAt: stat.mtime,
+      taskId: pending?.tempId,
+      taskStatus: pending ? describeTaskStatus(pending) : undefined,
+    };
+  }));
+  const copies = entries
+    .filter((copy): copy is LocalInsuranceCopy => copy !== null)
+    .sort((left, right) => right.modifiedAt - left.modifiedAt);
   return {
     copies,
     totalSize: copies.reduce((sum, copy) => sum + copy.size, 0),
@@ -60,6 +66,7 @@ export function isCopyClaimed(path: string, pendingUploads: Record<string, Pendi
 }
 
 export class LocalInsuranceCopiesModal extends Modal {
+  private renderGeneration = 0;
   constructor(
     app: ConstructorParameters<typeof Modal>[0],
     private readonly vault: Vault,
@@ -71,21 +78,26 @@ export class LocalInsuranceCopiesModal extends Modal {
   }
 
   onOpen(): void {
-    this.render();
+    void this.render();
   }
 
   onClose(): void {
+    this.renderGeneration += 1;
     this.contentEl.empty();
   }
 
-  private render(): void {
+  private async render(): Promise<void> {
+    const generation = ++this.renderGeneration;
     this.contentEl.empty();
-    const report = scanLocalInsuranceCopies(this.vault, this.getPendingUploads());
     this.contentEl.createEl("h2", { text: "本地保险副本" });
     this.contentEl.createEl("p", {
       cls: "setting-item-description",
       text: "上传时会先保留一份本地副本，避免断网、崩溃或引用写入失败造成附件丢失。任务安全完成后会自动清理。",
     });
+    const loading = this.contentEl.createEl("p", { text: "正在读取本地保险副本…" });
+    const report = await scanLocalInsuranceCopies(this.vault, this.getPendingUploads());
+    if (generation !== this.renderGeneration) return;
+    loading.remove();
     this.contentEl.createEl("p", {
       text: `当前 ${report.copies.length} 份，共占用 ${formatAttachmentSize(report.totalSize)}；${report.taskCount} 份正在等待处理，${report.unclaimedCount} 份没有关联任务。`,
     });
@@ -96,7 +108,7 @@ export class LocalInsuranceCopiesModal extends Modal {
         .setDesc("会继续上传、修复文档引用，并在确认安全后自动清理对应副本")
         .addButton((button) => button.setButtonText("立即重试").setCta().onClick(async () => {
           await this.run(() => this.actions.retryTasks());
-          this.render();
+          await this.render();
         }));
     }
 
@@ -113,12 +125,12 @@ export class LocalInsuranceCopiesModal extends Modal {
       setting
         .addButton((button) => button.setButtonText("恢复到附件目录").onClick(async () => {
           await this.run(() => this.actions.restore(copy.path));
-          this.render();
+          await this.render();
         }))
         .addButton((button) => button.setButtonText("永久删除").setWarning().onClick(() => {
           new ConfirmDeleteLocalCopyModal(this.app, copy, async () => {
             await this.run(() => this.actions.remove(copy.path));
-            this.render();
+            await this.render();
           }).open();
         }));
     }

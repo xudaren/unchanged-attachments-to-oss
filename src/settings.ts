@@ -157,17 +157,20 @@ export class OssSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h3", { text: "维护" });
 
-    const localCopies = scanLocalInsuranceCopies(plugin.app.vault, plugin.settings.pendingUploads);
-    new Setting(containerEl)
+    const localCopiesSetting = new Setting(containerEl)
       .setName("本地保险副本")
-      .setDesc(
-        localCopies.copies.length === 0
-          ? "当前没有保险副本，不占用额外空间"
-          : `当前 ${localCopies.copies.length} 份，共占用 ${formatAttachmentSize(localCopies.totalSize)}；可查看、恢复或继续处理`,
-      )
+      .setDesc("正在读取本地保险副本…")
       .addButton((button) => button.setButtonText("查看并管理").onClick(() => {
         plugin.openLocalInsuranceCopies();
       }));
+    void scanLocalInsuranceCopies(plugin.app.vault, plugin.settings.pendingUploads).then((localCopies) => {
+      if (!containerEl.isConnected) return;
+      localCopiesSetting.setDesc(
+        localCopies.copies.length === 0
+          ? "当前没有保险副本，不占用额外空间"
+          : `当前 ${localCopies.copies.length} 份，共占用 ${formatAttachmentSize(localCopies.totalSize)}；可查看、恢复或继续处理`,
+      );
+    });
 
     new Setting(containerEl)
       .setName("重试未完成任务")

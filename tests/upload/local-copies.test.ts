@@ -1,17 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFile, TFolder } from "obsidian";
 import {
   isCopyClaimed,
   scanLocalInsuranceCopies,
 } from "../../src/upload/local-copies";
 import type { PendingUpload } from "../../src/types";
-
-function stagedFile(path: string, size: number, mtime: number): TFile {
-  const file = new TFile(path);
-  Object.assign(file, { stat: { size, mtime } });
-  return file;
-}
 
 function pending(overrides: Partial<PendingUpload> = {}): PendingUpload {
   return {
@@ -29,21 +22,25 @@ function pending(overrides: Partial<PendingUpload> = {}): PendingUpload {
   };
 }
 
-test("summarizes local insurance copies with plain-language task states", () => {
+test("summarizes hidden local insurance copies through the Vault adapter", async () => {
   const claimedPath = ".oss-plugin-staging/11111111-1111-4111-8111-111111111111.png.stage";
   const unclaimedPath = ".oss-plugin-staging/22222222-2222-4222-8222-222222222222.pdf.stage";
-  const folder = new TFolder(".oss-plugin-staging", [
-    stagedFile(claimedPath, 20, 100),
-    stagedFile(unclaimedPath, 30, 200),
-  ]);
   const uploads = {
     task: pending({ stagingPath: claimedPath, displayName: "截图.png" }),
   };
   const vault = {
-    getAbstractFileByPath: (path: string) => path === folder.path ? folder : null,
+    adapter: {
+      list: async () => ({ files: [claimedPath, unclaimedPath], folders: [] }),
+      stat: async (path: string) => ({
+        type: "file",
+        size: path === claimedPath ? 20 : 30,
+        ctime: 0,
+        mtime: path === claimedPath ? 100 : 200,
+      }),
+    },
   };
 
-  const report = scanLocalInsuranceCopies(vault as never, uploads);
+  const report = await scanLocalInsuranceCopies(vault as never, uploads);
   assert.equal(report.totalSize, 50);
   assert.equal(report.taskCount, 1);
   assert.equal(report.unclaimedCount, 1);

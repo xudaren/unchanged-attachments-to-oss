@@ -59,9 +59,33 @@ test("refuses removal when the source document contains duplicate keys", async (
 test("never guesses a Live Preview or Canvas source from the active Markdown view", () => {
   const source = readFileSync("src/render/context-menu.ts", "utf8");
   assert.doesNotMatch(source, /getActiveViewOfType|MarkdownView/);
-  assert.match(source, /const sourcePath = data\.sourcePath \|\| null/);
+  assert.match(source, /getLeavesOfType\("markdown"\)/);
+  assert.match(source, /view\?\.containerEl\?\.contains\(element\)/);
   assert.match(source, /this\.lifetime\.abort\(\)/);
   assert.match(source, /for \(const modal of \[\.\.\.this\.previewModals\]\) modal\.close\(\)/);
+});
+
+test("resolves the exact Markdown owner for a Live Preview attachment", () => {
+  const file = new TFile("notes/current.md");
+  const element = {} as HTMLElement;
+  const menu = new OssAttachmentContextMenu({
+    app: {
+      workspace: {
+        getLeavesOfType: () => [{
+          view: {
+            file,
+            containerEl: { contains: (candidate: HTMLElement) => candidate === element },
+          },
+        }],
+      },
+    },
+  } as never);
+
+  const path = (menu as unknown as {
+    resolveSourcePath(element: HTMLElement, sourcePath?: string): string | null;
+  }).resolveSourcePath(element);
+
+  assert.equal(path, "notes/current.md");
 });
 
 test("dispose aborts a detached attachment listener and rejects future binds", () => {

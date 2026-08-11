@@ -4,7 +4,6 @@ import {
   Notice,
   Plugin,
   TFile,
-  TFolder,
   Vault,
 } from "obsidian";
 import { formatOssReference } from "../reference/codec";
@@ -249,11 +248,13 @@ export class AttachmentInterceptor {
       // Byte safety comes first. A journal must never make a captured File look
       // durable before its stable Vault copy actually exists.
       await this.ensureStagingFolder();
-      const stagingFile = await this.plugin.app.vault.createBinary(
-        stagingPath,
-        await captured.blob.arrayBuffer(),
-      );
-      stagedInput.sourceMtime = stagingFile.stat.mtime;
+      const adapter = this.plugin.app.vault.adapter;
+      await adapter.writeBinary(stagingPath, await captured.blob.arrayBuffer());
+      const stagingStat = await adapter.stat(stagingPath);
+      if (!stagingStat || stagingStat.type !== "file") {
+        throw new Error(`staging 写入后无法读取：${stagingPath}`);
+      }
+      stagedInput.sourceMtime = stagingStat.mtime;
     } catch (error) {
       throw new InputDurabilityError(stagedInput, error);
     }
@@ -762,9 +763,12 @@ export class AttachmentInterceptor {
    */
   async recoverUnjournaledStaging(): Promise<string[]> {
     const vault = this.plugin.app.vault;
-    if (typeof vault.getAbstractFileByPath !== "function") return [];
-    const folder = vault.getAbstractFileByPath(STAGING_DIR);
-    if (!(folder instanceof TFolder)) return [];
+    let stagingPaths: string[] = [];
+    try {
+      stagingPaths = (await vault.adapter.list(STAGING_DIR)).files;
+    } catch {
+      return [];
+    }
     const claimed = new Set<string>();
     for (const pending of Object.values(this.settings.pendingUploads ?? {})) {
       if (pending.stagingPath) claimed.add(pending.stagingPath);
@@ -772,13 +776,13 @@ export class AttachmentInterceptor {
     }
 
     const recovered: string[] = [];
-    for (const child of [...folder.children]) {
-      if (!(child instanceof TFile) || claimed.has(child.path)) continue;
+    for (const path of stagingPaths) {
+      if (claimed.has(path)) continue;
       try {
-        const targetPath = await this.restoreUnclaimedCopy(child);
+        const targetPath = await this.restoreUnclaimedCopy(path);
         if (targetPath) recovered.push(targetPath);
       } catch (error) {
-        console.error("[oss] 裸 staging 恢复失败，原文件保留", child.path, error);
+        console.error("[oss] 裸 staging 恢复失败，原文件保留", path, error);
       }
     }
     if (recovered.length > 0) {
@@ -789,40 +793,39 @@ export class AttachmentInterceptor {
 
   async restoreInsuranceCopy(path: string): Promise<void> {
     this.lifecycle?.assertActive("恢复本地保险副本");
-    const file = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile) || !isInternalStagingPath(file.path)) {
+    if (!isInternalStagingPath(path) || !await this.plugin.app.vault.adapter.exists(path)) {
       throw new Error("这份本地保险副本已不存在");
     }
     if (isCopyClaimed(path, this.settings.pendingUploads)) {
       throw new Error("这份副本已关联上传任务，请选择“立即重试”");
     }
-    const restoredPath = await this.restoreUnclaimedCopy(file);
+    const restoredPath = await this.restoreUnclaimedCopy(path);
     if (!restoredPath) throw new Error("无法识别这份保险副本的附件类型");
     new Notice(`附件已恢复到：${restoredPath}`);
   }
 
   async deleteUnclaimedInsuranceCopy(path: string): Promise<void> {
     this.lifecycle?.assertActive("永久删除本地保险副本");
-    const file = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile) || !isInternalStagingPath(file.path)) {
+    if (!isInternalStagingPath(path) || !await this.plugin.app.vault.adapter.exists(path)) {
       throw new Error("这份本地保险副本已不存在");
     }
     if (isCopyClaimed(path, this.settings.pendingUploads)) {
       throw new Error("上传任务已重新关联这份副本，已阻止删除");
     }
-    await this.plugin.app.vault.delete(file);
+    await this.plugin.app.vault.adapter.remove(path);
     new Notice("本地保险副本已永久删除");
   }
 
-  private async restoreUnclaimedCopy(file: TFile): Promise<string | null> {
-    const match = file.name.match(/^([0-9a-f-]{36})\.([a-z0-9]+)\.stage$/i);
+  private async restoreUnclaimedCopy(path: string): Promise<string | null> {
+    const fileName = path.slice(path.lastIndexOf("/") + 1);
+    const match = fileName.match(/^([0-9a-f-]{36})\.([a-z0-9]+)\.stage$/i);
     if (!match || !isSupportedExt(match[2])) return null;
     const targetName = `recovered-${match[1]}.${match[2].toLowerCase()}`;
     const targetPath = await this.plugin.app.fileManager.getAvailablePathForAttachment(targetName, "");
     this.suppressedLocalPaths.add(targetPath);
     try {
       this.lifecycle?.assertActive("恢复本地保险副本");
-      await this.plugin.app.vault.rename(file, targetPath);
+      await this.plugin.app.vault.adapter.rename(path, targetPath);
       return targetPath;
     } finally {
       setTimeout(() => this.suppressedLocalPaths.delete(targetPath), 1000);
@@ -906,10 +909,19 @@ export class AttachmentInterceptor {
   private async ensureStagingFolder(): Promise<void> {
     if (!this.stagingFolderReady) {
       this.stagingFolderReady = (async () => {
-        const existing = this.plugin.app.vault.getAbstractFileByPath(STAGING_DIR);
-        if (existing instanceof TFolder) return;
-        if (existing) throw new Error(`${STAGING_DIR} 已被同名文件占用`);
-        await this.plugin.app.vault.createFolder(STAGING_DIR);
+        const adapter = this.plugin.app.vault.adapter;
+        if (await adapter.exists(STAGING_DIR)) {
+          const stat = await adapter.stat(STAGING_DIR);
+          if (stat?.type === "folder") return;
+          throw new Error(`${STAGING_DIR} 已被同名文件占用`);
+        }
+        try {
+          await adapter.mkdir(STAGING_DIR);
+        } catch (error) {
+          // Another generation or device event may have created it after exists().
+          const stat = await adapter.stat(STAGING_DIR).catch(() => null);
+          if (stat?.type !== "folder") throw error;
+        }
       })().catch((error) => {
         this.stagingFolderReady = null;
         throw error;
@@ -919,6 +931,19 @@ export class AttachmentInterceptor {
   }
 
   private async deleteLocalFile(path: string, expectedSize?: number, expectedMtime?: number): Promise<void> {
+    if (isInternalStagingPath(path)) {
+      const stat = await this.plugin.app.vault.adapter.stat(path);
+      if (!stat || stat.type !== "file") return;
+      if (expectedSize !== undefined && stat.size !== expectedSize) {
+        throw new Error(`staging 大小已变化，已保留：${path}`);
+      }
+      if (expectedMtime !== undefined && stat.mtime !== expectedMtime) {
+        throw new Error(`staging 修改时间已变化，已保留：${path}`);
+      }
+      this.lifecycle?.assertActive("删除本地附件");
+      await this.plugin.app.vault.adapter.remove(path);
+      return;
+    }
     const file = this.plugin.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
     if (expectedSize !== undefined && file.stat.size !== expectedSize) {

@@ -116,7 +116,6 @@ test("startup recovers a byte-first staging file that has no journal", async () 
   const claimed = new TFile(
     ".oss-plugin-staging/22222222-2222-4222-8222-222222222222.png.stage",
   );
-  const folder = new TFolder(".oss-plugin-staging", [orphan, claimed]);
   const renamed: Array<[string, string]> = [];
   const settings = {
     ...DEFAULT_SETTINGS,
@@ -140,8 +139,10 @@ test("startup recovers a byte-first staging file that has no journal", async () 
   const interceptor = new AttachmentInterceptor({
     app: {
       vault: {
-        getAbstractFileByPath: (path: string) => path === folder.path ? folder : null,
-        rename: async (file: TFile, target: string) => { renamed.push([file.path, target]); },
+        adapter: {
+          list: async () => ({ files: [orphan.path, claimed.path], folders: [] }),
+          rename: async (path: string, target: string) => { renamed.push([path, target]); },
+        },
       },
       fileManager: {
         getAvailablePathForAttachment: async (name: string) => `attachments/${name}`,
@@ -157,6 +158,14 @@ test("startup recovers a byte-first staging file that has no journal", async () 
     orphan.path,
     "attachments/recovered-11111111-1111-4111-8111-111111111111.png",
   ]]);
+});
+
+test("reuses an existing hidden staging directory that is absent from the Vault index", async () => {
+  const result = await runDurabilityFailure("none", false, false, true);
+
+  assert.deepEqual(result.order.slice(0, 2), ["stage", "journal"]);
+  assert.equal(result.uploadCalls, 1);
+  assert.equal(result.stagingExists, false);
 });
 
 test("writes an ordinary local attachment when staging creation fails after capture", async () => {
@@ -515,6 +524,7 @@ async function runDurabilityFailure(
   failAt: "staging" | "journal" | "none",
   quiesceOnFailure = false,
   deferCapture = false,
+  hiddenStagingExists = false,
 ): Promise<{
   prevented: boolean;
   uploadCalls: number;
@@ -544,16 +554,35 @@ async function runDurabilityFailure(
   const plugin = {
     app: {
       vault: {
-        getAbstractFileByPath: (path: string) => files.get(path) ?? null,
-        createFolder: async (path: string) => { files.set(path, new TFolder(path)); },
-        createBinary: async (path: string, value: ArrayBuffer) => {
-          if (path.startsWith(".oss-plugin-staging/")) {
+        adapter: {
+          exists: async (path: string) => path === ".oss-plugin-staging"
+            ? hiddenStagingExists || files.has(path)
+            : files.has(path),
+          stat: async (path: string) => {
+            if (path === ".oss-plugin-staging" && hiddenStagingExists) {
+              return { type: "folder", size: 0, ctime: 0, mtime: 0 };
+            }
+            const file = files.get(path);
+            if (!file) return null;
+            if (file instanceof TFolder) return { type: "folder", size: 0, ctime: 0, mtime: 0 };
+            return { type: "file", size: file.stat.size, ctime: 0, mtime: file.stat.mtime };
+          },
+          mkdir: async (path: string) => { files.set(path, new TFolder(path)); },
+          writeBinary: async (path: string, value: ArrayBuffer) => {
             order.push("stage");
             if (failAt === "staging") {
               lifecycle?.quiesce();
               throw new Error("staging unavailable");
             }
-          }
+            const file = Object.assign(new TFile(path), { stat: { size: value.byteLength, mtime: 1 } });
+            files.set(path, file);
+            bytes.set(path, value);
+          },
+          remove: async (path: string) => { files.delete(path); bytes.delete(path); },
+        },
+        getAbstractFileByPath: (path: string) => files.get(path) ?? null,
+        createFolder: async (path: string) => { files.set(path, new TFolder(path)); },
+        createBinary: async (path: string, value: ArrayBuffer) => {
           const file = Object.assign(new TFile(path), { stat: { size: value.byteLength, mtime: 1 } });
           files.set(path, file);
           bytes.set(path, value);
