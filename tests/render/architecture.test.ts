@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-test("Reading View uses the shared signed URL resolver", () => {
+test("Reading View and Canvas use the shared signed URL resolver", () => {
   const main = readFileSync("src/main.ts", "utf8");
   const postProcessor = readFileSync("src/render/post-processor.ts", "utf8");
 
@@ -15,6 +15,7 @@ test("Reading View uses the shared signed URL resolver", () => {
   assert.doesNotMatch(postProcessor, /signedGetUrl/);
   assert.match(domRenderer, /ossKeyFromImageSource/);
   assert.doesNotMatch(postProcessor, /extractOssKey/);
+  assert.match(postProcessor, /el\.closest\("\.canvas-node"\)/);
 });
 
 test("credential and expiry changes clear all signed URL resolver state", () => {

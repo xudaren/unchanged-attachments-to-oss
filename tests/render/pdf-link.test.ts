@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildPdfLink } from "../../src/render/pdf-link";
 
-function fakeDocument() {
+function fakeDocument(listeners?: Map<string, () => void>) {
   return {
     createElement(tagName: string) {
       return {
@@ -16,6 +16,7 @@ function fakeDocument() {
         dataset: {} as Record<string, string>,
         children: [] as unknown[],
         append(...children: unknown[]) { this.children.push(...children); },
+        addEventListener(type: string, listener: () => void) { listeners?.set(type, listener); },
       };
     },
   } as unknown as Document;
@@ -34,6 +35,32 @@ test("builds a lightweight browser-open PDF attachment link", () => {
   assert.equal(element.children[2].href, "https://signed.example/vault/report.pdf");
   assert.equal(element.children[2].target, "_blank");
   assert.equal(element.children[2].className, "oss-pdf-open");
+});
+
+test("contains a rejected speculative PDF lease warmup", async () => {
+  const listeners = new Map<string, () => void>();
+  const rejection = new Error("signing unavailable");
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    buildPdfLink(
+      fakeDocument(listeners),
+      "https://signed.example/old.pdf",
+      "vault/report.pdf",
+      undefined,
+      {
+        resolve: async () => Promise.reject(rejection),
+        resolveLease: async () => Promise.reject(rejection),
+      },
+    );
+
+    listeners.get("pointerdown")?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
 });
 
 test("uses Markdown alt text as the PDF display name", () => {

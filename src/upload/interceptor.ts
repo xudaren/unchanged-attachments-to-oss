@@ -28,9 +28,30 @@ import {
   UploadPausedError,
 } from "./manager";
 import { UploadProgressBar } from "./progress";
+import { isCopyClaimed } from "./local-copies";
+import {
+  attachmentExtension,
+  captureAttachment,
+  clipboardFiles,
+  errorMessage,
+  formatAttachmentSize,
+  formatInputReadError,
+  formatInputReadFailureMarker,
+  isInternalStagingPath,
+  isOversizedOnMobile,
+  shouldKeepInputLocal,
+  STAGING_DIR,
+} from "./input";
 
-export const STAGING_DIR = ".oss-plugin-staging";
-const MOBILE_IN_MEMORY_LIMIT = 128 * 1024 * 1024;
+export {
+  captureAttachment,
+  clipboardFiles,
+  formatInputReadError,
+  formatInputReadFailureMarker,
+  isInternalStagingPath,
+  isOversizedOnMobile,
+  STAGING_DIR,
+} from "./input";
 
 interface PreparedInput {
   file: File;
@@ -136,7 +157,7 @@ export class AttachmentInterceptor {
     if (!this.settings.autoUpload) return;
     const files = clipboardFiles(event);
     if (!this.canTakeOver(files)) return;
-    if (shouldKeepLocalOnThisDevice(files)) {
+    if (shouldKeepInputLocal(files)) {
       new Notice("本批附件超过移动端安全内存上限，已交给 Obsidian 本地保存，不会自动发起网络上传");
       return;
     }
@@ -147,7 +168,7 @@ export class AttachmentInterceptor {
     if (!this.settings.autoUpload) return;
     const files = Array.from(event.dataTransfer?.files ?? []);
     if (!this.canTakeOver(files)) return;
-    if (shouldKeepLocalOnThisDevice(files)) {
+    if (shouldKeepInputLocal(files)) {
       new Notice("本批附件超过移动端安全内存上限，已交给 Obsidian 本地保存，不会自动发起网络上传");
       return;
     }
@@ -155,7 +176,7 @@ export class AttachmentInterceptor {
   }
 
   private canTakeOver(files: File[]): boolean {
-    return files.length > 0 && files.every((file) => isSupportedExt(extOf(file.name, file.type)));
+    return files.length > 0 && files.every((file) => isSupportedExt(attachmentExtension(file.name, file.type)));
   }
 
   private async takeOverInput(
@@ -221,7 +242,7 @@ export class AttachmentInterceptor {
     // Startup recovery must finish before a new .stage file can appear, or it
     // could mistake the byte-first journal window for a crash orphan.
     await this.stagingRecovery;
-    const ext = extOf(captured.name, captured.type);
+    const ext = attachmentExtension(captured.name, captured.type);
     const stagingPath = `${STAGING_DIR}/${input.tempId}.${ext}.stage`;
     const stagedInput: StagedInput = { ...input, ...captured, ext, stagingPath };
     try {
@@ -256,7 +277,7 @@ export class AttachmentInterceptor {
   }
 
   private async uploadStagedInput(input: StagedInput, editor: Editor, view: MarkdownView): Promise<void> {
-    const notice = new Notice(`上传中：${input.name} (${formatSize(input.size)})`, 0);
+    const notice = new Notice(`上传中：${input.name} (${formatAttachmentSize(input.size)})`, 0);
     let tempId = input.tempId;
     let uploadedObjectKey: string | null = null;
     try {
@@ -753,26 +774,59 @@ export class AttachmentInterceptor {
     const recovered: string[] = [];
     for (const child of [...folder.children]) {
       if (!(child instanceof TFile) || claimed.has(child.path)) continue;
-      const match = child.name.match(/^([0-9a-f-]{36})\.([a-z0-9]+)\.stage$/i);
-      if (!match || !isSupportedExt(match[2])) continue;
-      const targetName = `recovered-${match[1]}.${match[2].toLowerCase()}`;
-      let targetPath: string | null = null;
       try {
-        targetPath = await this.plugin.app.fileManager.getAvailablePathForAttachment(targetName, "");
-        this.suppressedLocalPaths.add(targetPath);
-        this.lifecycle?.assertActive("恢复裸 staging");
-        await vault.rename(child, targetPath);
-        recovered.push(targetPath);
+        const targetPath = await this.restoreUnclaimedCopy(child);
+        if (targetPath) recovered.push(targetPath);
       } catch (error) {
         console.error("[oss] 裸 staging 恢复失败，原文件保留", child.path, error);
-      } finally {
-        if (targetPath) setTimeout(() => this.suppressedLocalPaths.delete(targetPath!), 1000);
       }
     }
     if (recovered.length > 0) {
       new Notice(`已从异常中恢复 ${recovered.length} 个附件到本地；请在文件列表中重新插入对应附件`);
     }
     return recovered;
+  }
+
+  async restoreInsuranceCopy(path: string): Promise<void> {
+    this.lifecycle?.assertActive("恢复本地保险副本");
+    const file = this.plugin.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile) || !isInternalStagingPath(file.path)) {
+      throw new Error("这份本地保险副本已不存在");
+    }
+    if (isCopyClaimed(path, this.settings.pendingUploads)) {
+      throw new Error("这份副本已关联上传任务，请选择“立即重试”");
+    }
+    const restoredPath = await this.restoreUnclaimedCopy(file);
+    if (!restoredPath) throw new Error("无法识别这份保险副本的附件类型");
+    new Notice(`附件已恢复到：${restoredPath}`);
+  }
+
+  async deleteUnclaimedInsuranceCopy(path: string): Promise<void> {
+    this.lifecycle?.assertActive("永久删除本地保险副本");
+    const file = this.plugin.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile) || !isInternalStagingPath(file.path)) {
+      throw new Error("这份本地保险副本已不存在");
+    }
+    if (isCopyClaimed(path, this.settings.pendingUploads)) {
+      throw new Error("上传任务已重新关联这份副本，已阻止删除");
+    }
+    await this.plugin.app.vault.delete(file);
+    new Notice("本地保险副本已永久删除");
+  }
+
+  private async restoreUnclaimedCopy(file: TFile): Promise<string | null> {
+    const match = file.name.match(/^([0-9a-f-]{36})\.([a-z0-9]+)\.stage$/i);
+    if (!match || !isSupportedExt(match[2])) return null;
+    const targetName = `recovered-${match[1]}.${match[2].toLowerCase()}`;
+    const targetPath = await this.plugin.app.fileManager.getAvailablePathForAttachment(targetName, "");
+    this.suppressedLocalPaths.add(targetPath);
+    try {
+      this.lifecycle?.assertActive("恢复本地保险副本");
+      await this.plugin.app.vault.rename(file, targetPath);
+      return targetPath;
+    } finally {
+      setTimeout(() => this.suppressedLocalPaths.delete(targetPath), 1000);
+    }
   }
 
   private async commitRetryReference(
@@ -889,21 +943,6 @@ export class AttachmentInterceptor {
       console.error(`[oss] ${label}处理失败`, error);
     });
   }
-}
-
-export function clipboardFiles(event: ClipboardEvent): File[] {
-  const data = event.clipboardData;
-  const itemFiles = Array.from(data?.items ?? [])
-    .filter((item) => item.kind === "file")
-    .map((item) => item.getAsFile())
-    .filter((file): file is File => Boolean(file));
-  const listed = Array.from(data?.files ?? []);
-  const combined = itemFiles.length > 0 ? [...itemFiles, ...listed] : listed;
-  return combined.filter((file, index) => combined.indexOf(file) === index);
-}
-
-export function isInternalStagingPath(path: string): boolean {
-  return path === STAGING_DIR || path.startsWith(`${STAGING_DIR}/`);
 }
 
 function insertAllPlaceholders(editor: Editor, inputs: PreparedInput[]): void {
@@ -1041,79 +1080,6 @@ async function waitForOccurrences(
   return [];
 }
 
-function extOf(name: string, mime: string): string {
-  const dot = name.lastIndexOf(".");
-  if (dot >= 0 && dot < name.length - 1) return name.slice(dot + 1).toLowerCase();
-  const byMime: Record<string, string> = {
-    "image/jpeg": "jpg",
-    "image/svg+xml": "svg",
-    "video/quicktime": "mov",
-    "video/x-matroska": "mkv",
-    "video/ogg": "ogv",
-    "video/x-m4v": "m4v",
-    "audio/mpeg": "mp3",
-    "audio/mp4": "m4a",
-    "audio/aac": "aac",
-    "audio/opus": "opus",
-  };
-  if (byMime[mime.toLowerCase()]) return byMime[mime.toLowerCase()];
-  return mime.match(/\/([\w.+-]+)$/)?.[1]?.toLowerCase() ?? "";
-}
-
-function shouldKeepLocalOnThisDevice(files: File[]): boolean {
-  return isMobileUi() && files.reduce((sum, file) => sum + file.size, 0) > MOBILE_IN_MEMORY_LIMIT;
-}
-
-export function isOversizedOnMobile(size: number): boolean {
-  return isMobileUi() && size > MOBILE_IN_MEMORY_LIMIT;
-}
-
-function isMobileUi(): boolean {
-  return typeof document !== "undefined" && document.body?.classList.contains("is-mobile") === true;
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-export interface CapturedAttachment {
-  name: string;
-  type: string;
-  size: number;
-  blob: Blob;
-}
-
-export async function captureAttachment(file: File): Promise<CapturedAttachment> {
-  const bytes = await file.arrayBuffer();
-  const blob = new Blob([bytes], { type: file.type });
-  return { name: file.name, type: file.type, size: blob.size, blob };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-export function formatInputReadError(error: unknown): string {
-  const message = errorMessage(error);
-  if (
-    (error instanceof DOMException && error.name === "NotReadableError") ||
-    /requested file could not be read|permission problems.*reference to a file/i.test(message)
-  ) {
-    return "无法读取附件：文件可能仅存在云盘（如 iCloud、OneDrive 等），请先下载到本地后重试";
-  }
-  return `无法读取输入附件：${message}`;
-}
-
-export function formatInputReadFailureMarker(fileName: string): string {
-  const safeName = fileName
-    .replace(/[\r\n]+/g, " ")
-    .replace(/([\\`*_[\]<>])/g, "\\$1");
-  return `⚠ 附件读取失败：${safeName}（请下载到本地后重新粘贴）`;
 }

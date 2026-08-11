@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-test("uses one incremental observer for Live Preview and Canvas", () => {
+test("uses one incremental observer only for Live Preview", () => {
   const source = readFileSync("src/main.ts", "utf8");
 
   assert.doesNotMatch(source, /registerEditorExtension/);
@@ -28,6 +28,9 @@ test("uses one incremental observer for Live Preview and Canvas", () => {
   );
   assert.match(source, /disposeRemovedOssRenderSessions\(records, this\.attachmentContextMenu\)/);
   assert.match(source, /createOssPostProcessor\([\s\S]*?this\.renderLifetime/);
+  const renderer = readFileSync("src/render/dom-renderer.ts", "utf8");
+  assert.match(renderer, /RENDER_SURFACE_SELECTOR = "\.markdown-source-view"/);
+  assert.doesNotMatch(renderer, /RENDER_SURFACE_SELECTOR = [^\n]*canvas-node/);
 });
 
 test("does not rescan the whole document inside mutation callbacks", () => {

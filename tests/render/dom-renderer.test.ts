@@ -63,7 +63,7 @@ test("deduplicates mutation roots within one observer batch", () => {
   );
 });
 
-test("collapses overlapping Canvas mutation roots to one outer subtree scan", () => {
+test("collapses overlapping Live Preview mutation roots to one outer subtree scan", () => {
   const child = node(1, "IMG") as Node & { parentNode: Node | null };
   const outer = node(1, "DIV");
   child.parentNode = outer;
@@ -78,7 +78,7 @@ test("collapses overlapping Canvas mutation roots to one outer subtree scan", ()
   );
 });
 
-test("ignores mutations outside Live Preview and Canvas surfaces", () => {
+test("ignores mutations outside Live Preview surfaces", () => {
   const image = node(1, "IMG", { inSurface: false });
   const unrelatedTarget = node(1, "DIV", { inSurface: false });
   const unrelatedChild = node(1, "DIV", { inSurface: false });
@@ -92,14 +92,14 @@ test("ignores mutations outside Live Preview and Canvas surfaces", () => {
   );
 });
 
-test("selects a newly added Canvas surface without hydrating its outer UI container", () => {
-  const canvas = node(1, "DIV");
-  const outer = node(1, "DIV", { inSurface: false, nestedSurfaces: [canvas] });
+test("selects a newly added Live Preview surface without hydrating its outer UI container", () => {
+  const livePreview = node(1, "DIV");
+  const outer = node(1, "DIV", { inSurface: false, nestedSurfaces: [livePreview] });
   const unrelatedTarget = node(1, "DIV", { inSurface: false });
 
   assert.deepEqual(
     selectMutationRoots([record("childList", unrelatedTarget, [outer])]),
-    [canvas],
+    [livePreview],
   );
 });
 

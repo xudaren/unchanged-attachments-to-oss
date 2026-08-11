@@ -27,7 +27,9 @@ import {
 } from "./url-resolver";
 
 const MEDIA_TAGS = new Set(["IMG", "VIDEO", "AUDIO", "A", "EMBED", "SPAN"]);
-export const RENDER_SURFACE_SELECTOR = ".markdown-source-view, .canvas-node";
+// Canvas Markdown is rendered through the official post-processor. Observing
+// only Live Preview prevents competing with Canvas' own DOM reconciliation.
+export const RENDER_SURFACE_SELECTOR = ".markdown-source-view";
 const OSS_MEDIA_SELECTOR = [
   'img[src^="oss://"]',
   'video[src^="oss://"]',

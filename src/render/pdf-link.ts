@@ -54,6 +54,10 @@ export function buildPdfLink(
       void resolveUrlLease(resolver, key, lease).then((next) => {
         lease = next;
         open.href = next.url;
+      }).catch(() => {
+        // Pointer/focus warming is speculative. The click path retries and owns
+        // the user-visible failure handling, so warming must never leak a
+        // rejected Promise into the host application.
       });
     };
     open.addEventListener("pointerdown", warm);

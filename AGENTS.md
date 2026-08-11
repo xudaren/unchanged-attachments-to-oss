@@ -20,6 +20,8 @@
 
 - 设置页保存时对 OSS 凭证进行连通性校验（ping），验证 AK/SK 有效性，校验失败提前报错阻止保存
 
+- 设置页和命令面板提供“管理本地保险副本”入口，展示占用空间、关联任务与可执行的恢复、重试、安全清理操作
+
 # 为什么
 
 >描述功能的意义，按以下维度展开：
@@ -83,6 +85,8 @@ sequenceDiagram
 
 `editor-paste/editor-drop` 直传监听在插件加载时立即注册；接管输入后必须先在 Vault 根目录 `.oss-plugin-staging/` 建立 `{tempId}.{ext}.stage` 可跨重启恢复文件，再执行网络上传，禁止只把进程内 Blob 当作唯一数据源。staging 必须只用 Vault API 创建/读取/删除，`vault.on('create')`、迁移与核验必须排除该内部目录，任务进入 `done` 后立即清理。所有占位符必须在事件回调内一次性插入并作为唯一提交锚点，成功或失败回写都只能原位替换占位，禁止使用上传前保存的旧光标位置。`vault.on('create')` 兜底监听必须延迟到 `workspace.onLayoutReady` 后注册，禁止接收 Obsidian 冷启动为历史文件补发的 create 事件。兜底只负责本次运行中新落地的附件，不得把当前活动文档直接视为引用来源。插件必须等待 MetadataCache 建立链接关系，先从 `resolvedLinks` 找到指向该附件的候选 Markdown，再只读取候选文档并按真实链接解析结果确定每一个引用实例；每次重试禁止扫描全 Vault。在限定等待时间内找不到引用时跳过自动上传并保留本地文件。每个引用实例必须单独上传为一个 OSS Object，逐个替换并回读确认该实例已写入自己的 `oss://` 链接；同一 Markdown 内的重复引用也不共享 Object Key。只有该本地附件的全部引用实例都已独立迁移成功，并在删除前重新解析确认没有新增本地引用，才允许删除本地文件。
 
+“管理本地保险副本”只扫描 `.oss-plugin-staging/`，不得扫描全 Vault 或自动请求 OSS。界面禁止使用 staging、journal 等内部术语，统一解释为“上传中断时用于防止附件丢失的本地保险副本”；显示副本数量、总占用和每项状态。有关联任务的副本只能重试处理，不提供直接删除；无关联任务的副本优先提供“恢复到附件目录”。永久删除无关联副本必须逐项显式触发、再次确认并说明删除后无法恢复，默认不选中、不批量自动清理。插件不得按文件年龄自动删除本地保险副本。任务完成并验证引用后仍按原流程立即自动清理，无需用户操作。
+
 插件禁用或热重载时必须同步进入 `quiescing`：已经接管并开始读取的 File 仍需完成 staging 与任务日志落盘；已发出的 OSS 请求只允许持久化其安全结果，禁止继续下一次网络请求、提交引用或删除本地文件。所有异步根任务必须被生命周期统一跟踪。跨热重载实例必须通过 `globalThis + Symbol.for(pluginId)` 共享 generation 与持久化队列：新实例读取 `data.json` 前等待旧实例 drain，旧 generation 此后禁止整包 `saveData`，避免迟到写入覆盖新实例的 pending journal。
 
 上传失败分为两类：网络中断、超时、5xx 等可恢复错误必须保留 `uploadId + partList` 和本地附件，供状态栏重试或下次启动继续；用户主动取消、凭证/参数错误等不可恢复错误才调用 `AbortMultipartUpload` 并清除状态。续传必须校验附件大小、扩展名与原任务一致，禁止把另一个同名文件续传到旧任务。
@@ -97,7 +101,7 @@ Multipart 完成不等于迁移完成。任务状态至少覆盖 `staged → upl
 
 ### 渲染
 
-Reading View 只用 `registerMarkdownPostProcessor` 处理当前渲染片段；Live Preview 与 Canvas 在 `workspace.onLayoutReady` 后共用一个增量 `MutationObserver`，只处理 `.markdown-source-view` / `.canvas-node` 中本批次发生变化的目标节点与新增子树，禁止在 Observer 回调中重新扫描 `document`。
+Reading View 与 Canvas 只用 `registerMarkdownPostProcessor` 处理 Obsidian 当前交付的渲染片段；Canvas 文件节点本质上也是 Obsidian 管理的 Markdown Preview，禁止再用全局 Observer 竞争修改其内部 DOM。只有 Live Preview 在 `workspace.onLayoutReady` 后使用增量 `MutationObserver`，且只处理 `.markdown-source-view` 中本批次发生变化的目标节点与新增子树，禁止在 Observer 回调中重新扫描 `document`。
 
 所有渲染入口统一调用 `SignedUrlResolver`：缓存键由 `bucket + signedHost + objectKey` 组成，LRU 缓存保留至过期前 60s；同一缓存键正在签名时复用同一个 Promise；返回结果必须携带 `expireAt + generation`。PDF、音频、右键菜单与图片预览在用户动作发生时重新确认 lease；图片/视频进入视口准备挂载 URL 时也必须确认当前代际与剩余有效期，禁止把早先缓存的过期 URL 延迟挂载到 DOM。凭证、Endpoint 或有效期变化时先清空已完成和进行中的缓存并失效所有 render session，旧代请求无论成功或失败都必须转用当前配置重新解析，禁止向活动节点返回旧签名 URL。插件卸载与配置切换语义必须分离：配置切换允许旧请求转向新代重新解析；卸载必须把 resolver 永久置为 disposed，禁止 in-flight 请求复活。Reading View 尚未挂入 workspace 的 detached fragment、已打开预览 Modal 和其监听也属于当前 render lifetime，卸载后不得继续写 DOM 或保留旧插件闭包。V4 派生 HMAC-SHA256 Key 应按 Secret、日期、Region 复用，避免每个附件重复导入和派生。
 
@@ -141,6 +145,7 @@ ListObjects 权限只属于可选核验能力，设置保存时的凭证探针�
 - 多文档引用提交失败时禁止留下无恢复信息的半迁移状态；安全回滚或持久化逐文档提交进度至少满足其一。
 - 本地引用替换必须通过 Obsidian MetadataCache/链接解析结果确认目标附件，禁止仅按 basename 在全库正则替换，因为不同目录可能存在同名附件。
 - 拦截路径必须先持久化 staging 再上传；上传失败时必须确认本地数据已存在后再把占位原位替换为本地链接，禁止先删占位或直接丢弃数据。
+- 本地保险副本管理不得删除任何仍被 `pendingUploads` 的 `stagingPath` 或内部 `localPath` 引用的文件；无关联副本永久删除前必须再次按当前任务状态复核，防止列表打开后新任务认领该文件。
 - `vault.on('create')` 兜底必须在 `onLayoutReady` 后注册，且引用等待每轮只能读取 MetadataCache `resolvedLinks` 命中的候选 Markdown；禁止冷启动处理历史附件或为单个新附件反复扫描全 Vault。
 - 删除远端前必须二次确认，禁止跨文档引用统计带来的复杂度，误删责任由用户承担。
 - 禁止创建或持久化 OSS 引用索引，也禁止监听 `modify/delete` 推断删除意图，因为破坏性远端操作必须由用户从插件显式入口发起。
@@ -156,7 +161,7 @@ ListObjects 权限只属于可选核验能力，设置保存时的凭证探针�
 - 核验结果中的疑似垃圾默认不选中，最近 24 小时对象必须处于删除保护期；真正删除前必须重新扫描 Vault 引用，禁止删除扫描后恢复引用的对象。
 - MutationObserver 回调必须只处理本批次变更节点和新增子树，禁止调用 `document.querySelectorAll` 或等价的全页扫描，因为 Obsidian 编辑、滚动和拖动 Canvas 会高频修改 DOM。
 - MutationObserver 的 `removedNodes` 只有在回调执行时节点仍未重新连接 DOM，才可释放渲染会话；媒体加标题、Canvas 重排等 `replaceWith → appendChild` 会产生“先移除后重新接入”的移动记录，禁止将其误判成真实删除，否则会形成 `恢复 oss:// → 再渲染 → 再移动` 的死循环。
-- Reading View、Live Preview、Canvas 必须有单一渲染责任方，禁止同一视图由两套渲染器竞争写入 URL；Reading View 归 Post Processor，Live Preview/Canvas 归增量 Observer。
+- Reading View、Live Preview、Canvas 必须有单一渲染责任方，禁止同一视图由两套渲染器竞争写入 URL；Reading View 与 Canvas 归 Post Processor，Live Preview 归增量 Observer。
 - OSS 附件右键菜单必须阻止 Obsidian 图片菜单继续冒泡，并且只能对当前 Object Key 和可确认的来源 Markdown 执行操作；禁止因 DOM 外层仍为 `.image-embed` 就展示图片专属操作。
 - 右键菜单移除 OSS 附件时必须遵循“确认联动删除 → 删除 OSS Object → 删除当前 Markdown 引用”的顺序；远端删除失败时禁止修改 Markdown，避免引用先丢失后无法重试远端删除。
 - 渲染监听必须延迟到 `workspace.onLayoutReady` 注册；插件卸载或热重载时必须先断开 Observer、永久失效旧 resolver，再同步释放 workspace 与 detached fragment 的 render session、预览 Modal、右键菜单和媒体监听，并把已挂载签名 URL 恢复为 canonical `oss://`，禁止旧 client 闭包残留或异步复活。

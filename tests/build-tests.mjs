@@ -24,6 +24,7 @@ await esbuild.build({
     "tests/upload/links.test.ts",
     "tests/upload/interceptor.test.ts",
     "tests/upload/indicator.test.ts",
+    "tests/upload/local-copies.test.ts",
     "tests/upload/manager.test.ts",
     "tests/upload/types.test.ts",
     "tests/delete/watcher.test.ts",

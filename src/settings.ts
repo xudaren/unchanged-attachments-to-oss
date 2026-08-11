@@ -8,6 +8,8 @@ import {
 import { OssClient } from "./oss/client";
 import { formatCredentialNotice } from "./oss/errors";
 import { LifecycleQuiescedError } from "./lifecycle";
+import { scanLocalInsuranceCopies } from "./upload/local-copies";
+import { formatAttachmentSize } from "./upload/input";
 
 /** 凭证相关字段的草稿缓冲 */
 interface CredentialDraft {
@@ -155,9 +157,21 @@ export class OssSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h3", { text: "维护" });
 
+    const localCopies = scanLocalInsuranceCopies(plugin.app.vault, plugin.settings.pendingUploads);
+    new Setting(containerEl)
+      .setName("本地保险副本")
+      .setDesc(
+        localCopies.copies.length === 0
+          ? "当前没有保险副本，不占用额外空间"
+          : `当前 ${localCopies.copies.length} 份，共占用 ${formatAttachmentSize(localCopies.totalSize)}；可查看、恢复或继续处理`,
+      )
+      .addButton((button) => button.setButtonText("查看并管理").onClick(() => {
+        plugin.openLocalInsuranceCopies();
+      }));
+
     new Setting(containerEl)
       .setName("重试未完成任务")
-      .setDesc("继续上传、提交引用或清理本地 staging；移动端也可从这里恢复")
+      .setDesc("继续上传、写入文档引用，并在确认安全后清理本地保险副本")
       .addButton((b) =>
         b.setButtonText("立即重试").onClick(async () => {
           await this.runWhileActive(async () => {

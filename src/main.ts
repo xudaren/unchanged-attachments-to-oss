@@ -32,6 +32,7 @@ import { AutoUploadIndicator, RetryIndicator } from "./upload/indicator";
 import { UploadManager } from "./upload/manager";
 import { migrateAttachments } from "./upload/migrate";
 import { UploadProgressBar } from "./upload/progress";
+import { LocalInsuranceCopiesModal } from "./upload/local-copies";
 import { OssAttachmentContextMenu } from "./render/context-menu";
 import { disconnectMediaLoading } from "./render/media-loading";
 import { runObjectAudit } from "./audit/modal";
@@ -245,6 +246,12 @@ export default class OssPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "manage-local-insurance-copies",
+      name: "管理本地保险副本",
+      callback: () => this.openLocalInsuranceCopies(),
+    });
+
+    this.addCommand({
       id: "audit-oss-object-references",
       name: "核验 OSS 对象引用",
       callback: () => {
@@ -417,6 +424,21 @@ export default class OssPlugin extends Plugin {
       console.warn("[oss-retry] 手动恢复仍有失败", error);
       new Notice((error as Error).message);
     }
+  }
+
+  openLocalInsuranceCopies(): void {
+    this.lifecycle.assertActive("管理本地保险副本");
+    new LocalInsuranceCopiesModal(
+      this.app,
+      this.app.vault,
+      () => this.settings.pendingUploads,
+      {
+        retryTasks: () => this.retryPendingUploads(),
+        restore: (path) => this.interceptor.restoreInsuranceCopy(path),
+        remove: (path) => this.interceptor.deleteUnclaimedInsuranceCopy(path),
+      },
+      this.lifecycle,
+    ).open();
   }
 
   isConfigured(): boolean {

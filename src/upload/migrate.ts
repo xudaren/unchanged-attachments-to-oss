@@ -1,7 +1,7 @@
 import { Modal, Notice, Plugin, Setting, TFile } from "obsidian";
 import { isLifecycleUploadPause, UploadManager } from "./manager";
 import { LifecycleGate } from "../lifecycle";
-import { isOversizedOnMobile } from "./interceptor";
+import { isOversizedOnMobile } from "./input";
 import {
   AttachmentOccurrence,
   replaceOneResolvedAttachmentReference,

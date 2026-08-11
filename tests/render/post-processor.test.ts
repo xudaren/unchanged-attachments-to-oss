@@ -61,13 +61,14 @@ test("Reading View hydrates successful nodes when a sibling signature fails", as
   assert.equal(bad.errorText, "OSS 媒体签名失败: vault/bad.jpg");
 });
 
-test("Reading View processor leaves Canvas nodes to the incremental observer", async () => {
+test("Canvas uses the official post-processor without exposing Markdown removal", async () => {
   const canvasImage = image("oss://vault/canvas.jpg");
   const root = {
-    closest: () => ({} as Element),
+    closest: (selector: string) => selector === ".canvas-node" ? ({} as Element) : null,
     querySelectorAll: (selector: string) => selector.includes('img[src^="oss://"]') ? [canvasImage] : [],
   } as unknown as HTMLElement;
   let resolutions = 0;
+  let boundSourcePath: string | undefined = "not-bound";
   const resolver = {
     resolve: async () => {
       resolutions += 1;
@@ -79,10 +80,13 @@ test("Reading View processor leaves Canvas nodes to the incremental observer", a
     bucketName: "bucket",
     accessKeyId: "ak",
     accessKeySecret: "sk",
-  } as PluginSettings, resolver)(root, {} as never);
+  } as PluginSettings, resolver, undefined, {
+    bind: (_element, _kind, _url, _key, sourcePath) => { boundSourcePath = sourcePath; },
+  })(root, { sourcePath: "目录1/目录1.md" } as never);
 
-  assert.equal(resolutions, 0);
-  assert.equal(canvasImage.src, "oss://vault/canvas.jpg");
+  assert.equal(resolutions, 1);
+  assert.equal(canvasImage.src, "https://signed.example/vault/canvas.jpg");
+  assert.equal(boundSourcePath, undefined);
 });
 
 test("Reading View does not attach an old batch error to a reused node", async () => {
