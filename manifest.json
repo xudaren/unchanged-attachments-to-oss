@@ -3,7 +3,7 @@
   "name": "Unchanged Attachments to OSS",
   "version": "0.1.0",
   "minAppVersion": "1.4.0",
-  "description": "将 Obsidian 图片、音视频和 PDF 自动上传到阿里云 OSS，以永久 oss:// 引用存储并动态签名渲染。",
+  "description": "Automatically upload images, audio, video, and PDFs to Aliyun OSS. Store as permanent oss:// references with dynamic signed URL rendering.",
   "author": "xukai",
   "authorUrl": "https://github.com/xukai",
   "isDesktopOnly": false
