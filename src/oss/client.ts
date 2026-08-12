@@ -265,7 +265,7 @@ export class OssClient {
     let keyMarker: string | null = null;
     let uploadIdMarker: string | null = null;
     const seenMarkers = new Set<string>();
-    do {
+    for (;;) {
       const query: Record<string, string> = {
         uploads: "",
         prefix: scopedPrefix,
@@ -288,7 +288,7 @@ export class OssClient {
       seenMarkers.add(markerPair);
       keyMarker = page.nextKeyMarker;
       uploadIdMarker = page.nextUploadIdMarker;
-    } while (true);
+    }
     return uploads;
   }
 
@@ -436,7 +436,7 @@ function escapeXml(value: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
+    .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
 }
 

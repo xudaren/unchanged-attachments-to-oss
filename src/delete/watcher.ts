@@ -216,7 +216,7 @@ class ConfirmReferenceRemovalModal extends Modal {
         }))
       .addButton((b) => b
         .setButtonText("删除 OSS 并移除引用")
-        .setWarning()
+        .setDestructive()
         .onClick(async () => {
           this.close();
           await this.onConfirm();
@@ -251,9 +251,6 @@ class ConfirmDocumentDeletionModal extends Modal {
 
     const selected = new Set<string>();
     const listEl = contentEl.createDiv({ cls: "oss-delete-list" });
-    listEl.style.maxHeight = "260px";
-    listEl.style.overflow = "auto";
-    listEl.style.marginBottom = "12px";
     for (const key of this.keys) {
       new Setting(listEl)
         .setName(key)
@@ -272,7 +269,7 @@ class ConfirmDocumentDeletionModal extends Modal {
       .addButton((b) =>
         b
           .setButtonText("删除文档")
-          .setWarning()
+          .setDestructive()
           .onClick(async () => {
             this.close();
             await this.onConfirm(Array.from(selected));

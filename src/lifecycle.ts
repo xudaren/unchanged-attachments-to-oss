@@ -2,9 +2,11 @@
  * A hot-reload-safe lifecycle shared by every loaded copy of the plugin bundle.
  *
  * Obsidian does not await `Plugin.onunload()`. The next bundle must therefore
- * coordinate with the previous bundle through `globalThis`, wait for its root
+ * coordinate with the previous bundle through `window`, wait for its root
  * tasks and persistence tail, and only then read data.json.
  */
+
+import { normalizeError } from "./error";
 
 interface SharedLifecycleOwner {
   readonly generation: number;
@@ -94,7 +96,7 @@ export class PluginLifecycle implements LifecycleGate, SharedLifecycleOwner {
       this.assertActive();
       return this.track(Promise.resolve(factory()));
     } catch (error) {
-      return Promise.reject(error);
+      return Promise.reject(normalizeError(error));
     }
   }
 
@@ -184,7 +186,7 @@ export class PluginLifecycle implements LifecycleGate, SharedLifecycleOwner {
 
 function getCoordinator(pluginId: string): SharedLifecycleCoordinator {
   const key = Symbol.for(`${pluginId}:shared-lifecycle`);
-  const shared = globalThis as unknown as Record<PropertyKey, unknown>;
+  const shared = window as unknown as Record<PropertyKey, unknown>;
   const existing = shared[key] as SharedLifecycleCoordinator | undefined;
   if (existing) return existing;
   const coordinator: SharedLifecycleCoordinator = {

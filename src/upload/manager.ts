@@ -198,8 +198,8 @@ export class UploadManager {
           () => {
             this.assertAutomaticUploadEnabled(req);
             return this.client.initiateMultipart(
-              pending!.objectKey,
-              mimeOf(pending!.ext),
+              pending.objectKey,
+              mimeOf(pending.ext),
               beforeSend,
             );
           },
@@ -221,8 +221,8 @@ export class UploadManager {
             () => {
               this.assertAutomaticUploadEnabled(req);
               return this.client.uploadPart({
-                key: pending!.objectKey,
-                uploadId: pending!.uploadId,
+                key: pending.objectKey,
+                uploadId: pending.uploadId,
                 partNumber,
                 body,
                 beforeSend,
@@ -249,9 +249,9 @@ export class UploadManager {
             () => {
               this.assertAutomaticUploadEnabled(req);
               return this.client.completeMultipart({
-                key: pending!.objectKey,
-                uploadId: pending!.uploadId,
-                parts: pending!.parts,
+                key: pending.objectKey,
+                uploadId: pending.uploadId,
+                parts: pending.parts,
                 beforeSend,
               });
             },
@@ -617,7 +617,7 @@ async function withRetry<T>(
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 async function interruptibleSleep(ms: number, lifecycle?: LifecycleGate): Promise<void> {

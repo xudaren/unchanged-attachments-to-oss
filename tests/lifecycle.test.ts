@@ -73,3 +73,15 @@ test("run invokes capture synchronously and rejects new work after quiesce", asy
   await work;
   await lifecycle.drain();
 });
+
+test("run normalizes non-Error synchronous rejection reasons", async () => {
+  const lifecycle = await PluginLifecycle.activate(`lifecycle-error-${crypto.randomUUID()}`);
+  const work = lifecycle.run(() => {
+    throw "capture failed";
+  });
+
+  await assert.rejects(work, (error: unknown) => (
+    error instanceof Error && error.message === "capture failed"
+  ));
+  await lifecycle.drain();
+});

@@ -13,7 +13,7 @@ export class UploadProgressBar {
 
   constructor(plugin: Plugin) {
     this.el = plugin.addStatusBarItem();
-    this.el.style.display = "none";
+    this.el.addClasses(["oss-upload-progress", "oss-is-hidden"]);
   }
 
   begin(fileName: string, totalParts: number): void {
@@ -21,7 +21,7 @@ export class UploadProgressBar {
     this.total = totalParts;
     this.current = 0;
     this.render();
-    this.el.style.display = "";
+    this.el.removeClass("oss-is-hidden");
   }
 
   advance(partsDone?: number): void {
@@ -34,7 +34,7 @@ export class UploadProgressBar {
   }
 
   finish(): void {
-    this.el.style.display = "none";
+    this.el.addClass("oss-is-hidden");
     this.el.textContent = "";
   }
 

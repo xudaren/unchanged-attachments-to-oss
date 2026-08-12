@@ -83,7 +83,7 @@ export function normalizeObjectKeyPrefix(value: string): string {
   // is identity-preserving for both legacy and newly verified configurations.
   const prefix = value.replace(/\/+$/g, "");
   if (!prefix.trim()) throw new Error("Object Key 前缀不能为空");
-  if (/[\u0000-\u001f\u007f]/.test(prefix)) {
+  if (hasControlCharacter(prefix)) {
     throw new Error("Object Key 前缀不能包含控制字符");
   }
   const segments = prefix.split("/");
@@ -94,6 +94,14 @@ export function normalizeObjectKeyPrefix(value: string): string {
     throw new Error("Object Key 前缀占用了插件内部命名：请勿使用 uploading 或 .oss-plugin-probe");
   }
   return prefix;
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit <= 0x1f || codeUnit === 0x7f) return true;
+  }
+  return false;
 }
 
 export function defaultObjectKeyPrefix(vaultName: string): string {

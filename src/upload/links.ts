@@ -129,7 +129,7 @@ function occurrenceSignature(occurrences: AttachmentOccurrence[]): string {
 }
 
 function yieldFor(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 /**
@@ -207,7 +207,7 @@ export async function scanMigrationOccurrences(
 }
 
 function yieldToUi(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
 /** Build one migration item for every resolved embed occurrence. */
@@ -534,7 +534,7 @@ function altFromOriginal(original: string): string {
 }
 
 function unescapeAlt(value: string): string {
-  return value.replace(/\\([\\\[\]])/g, "$1");
+  return value.replace(/\\([\[\]\\])/g, "$1");
 }
 
 function findUnescaped(value: string, char: string, from: number): number {

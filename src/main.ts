@@ -377,7 +377,7 @@ export default class OssPlugin extends Plugin {
     }
     const encrypted = raw?.encryptedCredentials;
     if (encrypted !== undefined && !isEncryptedCredentials(encrypted)) {
-      this.settings.encryptedCredentials = encrypted as EncryptedCredentials;
+      this.settings.encryptedCredentials = encrypted;
       this.settings.accessKeyId = "";
       this.settings.accessKeySecret = "";
     } else if (encrypted) {

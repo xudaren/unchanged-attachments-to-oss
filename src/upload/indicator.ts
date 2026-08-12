@@ -14,7 +14,6 @@ export class AutoUploadIndicator {
   ) {
     this.el = plugin.addStatusBarItem();
     this.el.addClass("oss-autoupload-indicator");
-    this.el.style.cursor = "pointer";
     this.el.setAttr("aria-label", "点击切换 OSS 自动上传开关");
     this.el.onclick = async () => {
       await this.toggle();
@@ -61,8 +60,7 @@ export class RetryIndicator {
     this.entries.push(...initialEntries);
     this.el = plugin.addStatusBarItem();
     this.el.addClass("oss-retry-indicator");
-    this.el.style.cursor = "pointer";
-    this.el.style.display = "none";
+    this.el.addClass("oss-is-hidden");
     this.el.onclick = () => void this.triggerRetry();
     this.render();
   }
@@ -110,11 +108,11 @@ export class RetryIndicator {
 
   private render(): void {
     if (this.entries.length === 0) {
-      this.el.style.display = "none";
+      this.el.addClass("oss-is-hidden");
       this.el.textContent = "";
       return;
     }
-    this.el.style.display = "";
+    this.el.removeClass("oss-is-hidden");
     this.el.textContent = `⚠ 待重试 ${this.entries.length} · 点击`;
     this.el.setAttr("title", "点击重试上传失败并回写本地的附件");
   }

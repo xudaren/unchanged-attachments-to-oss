@@ -3,11 +3,13 @@ import test from "node:test";
 import { RetryIndicator } from "../../src/upload/indicator";
 
 test("requeues only failed entries after a partially successful retry", async () => {
+  const classes = new Set<string>();
   const element = {
     style: {} as Record<string, string>,
     textContent: "",
     onclick: null as null | (() => void),
-    addClass: () => undefined,
+    addClass: (name: string) => classes.add(name),
+    removeClass: (name: string) => classes.delete(name),
     setAttr: () => undefined,
   };
   const plugin = { addStatusBarItem: () => element };
@@ -19,10 +21,12 @@ test("requeues only failed entries after a partially successful retry", async ()
     [first, second],
   );
 
+  assert.equal(classes.has("oss-is-hidden"), false);
   element.onclick?.();
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(element.textContent, "⚠ 待重试 1 · 点击");
+  assert.equal(classes.has("oss-is-hidden"), false);
   indicator.push(second);
   assert.equal(element.textContent, "⚠ 待重试 1 · 点击", "same task must be deduplicated by tempId");
 });

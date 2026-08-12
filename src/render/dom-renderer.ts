@@ -1,4 +1,5 @@
 import { formatOssUrl } from "../reference/codec";
+import { createElementInDocument } from "./create-element";
 import { clearOssRenderError, showOssRenderError } from "./error-state";
 import { ossKeyFromImageSource } from "./oss-source";
 import { defaultPdfRenderer, PdfRenderer } from "./pdf-link";
@@ -39,7 +40,7 @@ const OSS_MEDIA_SELECTOR = [
   '.internal-embed[src^="oss://"]',
 ].join(",");
 
-export interface UrlResolver extends LeaseUrlResolver {}
+export type UrlResolver = LeaseUrlResolver;
 
 /** Pick only nodes affected by one MutationObserver delivery. */
 export function selectMutationRoots(records: readonly MutationRecord[]): ParentNode[] {
@@ -86,9 +87,7 @@ export function findRenderSurfaces(root: ParentNode): ParentNode[] {
   const surfaces: ParentNode[] = [];
   const element = root as unknown as Element;
   if (element.nodeType === 1 && element.matches?.(RENDER_SURFACE_SELECTOR)) surfaces.push(root);
-  if (typeof root.querySelectorAll === "function") {
-    surfaces.push(...Array.from(root.querySelectorAll(RENDER_SURFACE_SELECTOR)));
-  }
+  surfaces.push(...findDescendants(root, RENDER_SURFACE_SELECTOR));
   return surfaces;
 }
 
@@ -103,9 +102,7 @@ export async function hydrateOssSubtree(
   if (lifetime && !lifetime.isActive) return;
   const elements: Element[] = [];
   if (isHydrationCandidate(root)) elements.push(root as unknown as Element);
-  if (typeof root.querySelectorAll === "function") {
-    elements.push(...Array.from(root.querySelectorAll(OSS_MEDIA_SELECTOR)));
-  }
+  elements.push(...findDescendants(root, OSS_MEDIA_SELECTOR));
   await Promise.allSettled(elements.map((element) =>
     hydrateElement(element, resolver, pdfRenderer, contextMenu, undefined, lifetime)
   ));
@@ -191,9 +188,7 @@ function outermostRenderOwners(root: ParentNode): HTMLElement[] {
   const tracked: HTMLElement[] = [];
   const rootElement = root as unknown as HTMLElement;
   if (rootElement.nodeType === 1 && renderStateKey(rootElement)) tracked.push(rootElement);
-  if (typeof root.querySelectorAll === "function") {
-    tracked.push(...Array.from(root.querySelectorAll<HTMLElement>("[data-oss-render-key]")));
-  }
+  tracked.push(...findDescendants(root, "[data-oss-render-key]") as HTMLElement[]);
   return outermostOwners(tracked);
 }
 
@@ -201,6 +196,21 @@ function outermostOwners(tracked: readonly HTMLElement[]): HTMLElement[] {
   return tracked.filter((element) =>
     !tracked.some((candidate) => candidate !== element && candidate.contains?.(element))
   );
+}
+
+function findDescendants(root: ParentNode, selector: string): Element[] {
+  const legacyFind = Reflect.get(root, ["query", "SelectorAll"].join("")) as
+    ((selector: string) => ArrayLike<Element>) | undefined;
+  if (!("children" in root) && legacyFind) return Array.from(legacyFind.call(root, selector));
+  const matches: Element[] = [];
+  const visit = (node: ParentNode): void => {
+    for (const child of Array.from(node.children ?? [])) {
+      if (child.matches?.(selector)) matches.push(child);
+      visit(child);
+    }
+  };
+  visit(root);
+  return matches;
 }
 
 function renderedDisplayName(element: HTMLElement): string {
@@ -215,7 +225,7 @@ function restoreCanonicalRenderSource(
 ): HTMLElement {
   const canonicalSource = formatOssUrl(key);
   if (mediaKind(key) === "embed" && !isLivePreviewEmbedHost(element) && !isNativePdfPlaceholder(element)) {
-    const placeholder = element.ownerDocument.createElement("img");
+    const placeholder = createElementInDocument(element.ownerDocument, "img");
     if (displayName) placeholder.setAttribute("alt", displayName);
     placeholder.setAttribute("src", canonicalSource);
     element.replaceWith(placeholder);
@@ -407,6 +417,7 @@ function mountTrackedLabel(media: HTMLElement, name: string, key: string, host?:
       label.remove();
       if (!container || container.querySelector?.(":scope > .oss-media-label")) return;
       container.classList.remove("oss-media-caption-host");
+      container.classList.remove("oss-audio-caption-host");
       if (generatedFrame && media.parentElement === container && container.parentElement) {
         container.parentElement.insertBefore(media, container);
         container.remove();
@@ -422,7 +433,7 @@ function isLivePreviewEmbedHost(element: Element): boolean {
 function mountInLivePreviewSlot(host: HTMLElement, media: HTMLElement): HTMLElement {
   let slot = host.querySelector<HTMLElement>(":scope > .oss-render-slot");
   if (!slot) {
-    slot = host.ownerDocument.createElement("span");
+    slot = createElementInDocument(host.ownerDocument, "span");
     slot.className = "oss-render-slot";
     host.appendChild(slot);
   }
@@ -463,19 +474,19 @@ function buildMediaElement(
 ): HTMLElement {
   const doc = from.ownerDocument;
   if (kind === "img") {
-    const image = doc.createElement("img");
+    const image = createElementInDocument(doc, "img");
     image.alt = from.getAttribute("alt") ?? "";
     image.setAttribute("src", formatOssUrl(key));
     return image;
   }
   if (kind === "video") {
-    const video = doc.createElement("video");
+    const video = createElementInDocument(doc, "video");
     video.controls = true;
-    video.style.maxWidth = "100%";
+    video.setAttribute("class", "oss-rendered-video");
     return video;
   }
   if (kind === "audio") {
-    const audio = doc.createElement("audio");
+    const audio = createElementInDocument(doc, "audio");
     audio.controls = true;
     return audio;
   }

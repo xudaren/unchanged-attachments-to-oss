@@ -1,5 +1,6 @@
 import type { LeaseUrlResolver, SignedUrlLease } from "./url-resolver";
 import { resolveUrlLease } from "./url-resolver";
+import { createElementInDocument } from "./create-element";
 
 export interface PdfRenderer {
   mount(
@@ -20,28 +21,28 @@ export function buildPdfLink(
   resolver?: LeaseUrlResolver,
   initialLease?: SignedUrlLease,
 ): HTMLElement {
-  const attachment = doc.createElement("div");
+  const attachment = createElementInDocument(doc, "div");
   attachment.className = "oss-pdf-attachment";
   attachment.dataset.ossKey = key;
 
-  const badge = doc.createElement("span");
+  const badge = createElementInDocument(doc, "span");
   badge.className = "oss-pdf-badge";
   badge.textContent = "PDF";
 
-  const details = doc.createElement("span");
+  const details = createElementInDocument(doc, "span");
   details.className = "oss-pdf-details";
 
-  const name = doc.createElement("span");
+  const name = createElementInDocument(doc, "span");
   name.className = "oss-pdf-name";
   name.textContent = normalizeDisplayName(displayName) || decodeFileName(key);
   name.title = name.textContent;
 
-  const meta = doc.createElement("span");
+  const meta = createElementInDocument(doc, "span");
   meta.className = "oss-pdf-meta";
   meta.textContent = "PDF 文档";
   details.append(name, meta);
 
-  const open = doc.createElement("a");
+  const open = createElementInDocument(doc, "a");
   open.className = "oss-pdf-open";
   open.href = url;
   open.target = "_blank";

@@ -1,4 +1,5 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import type { SettingDefinitionItem } from "obsidian";
 import type OssPlugin from "./main";
 import {
   establishedStorageIdentityKey,
@@ -31,8 +32,21 @@ export class OssSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
-  display(): void {
-    const { containerEl, plugin } = this;
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [{
+      name: "阿里云 OSS 配置",
+      desc: "配置凭证、自动上传、签名 URL 与本地保险副本维护",
+      aliases: ["Region", "Bucket", "AccessKey", "Endpoint", "Object Key", "自动上传", "保险副本", "重试", "分片"],
+      render: (setting) => {
+        setting.settingEl.addClass("oss-settings-root");
+        setting.infoEl.remove();
+        this.renderSettings(setting.settingEl);
+      },
+    }];
+  }
+
+  private renderSettings(containerEl: HTMLElement): void {
+    const { plugin } = this;
     containerEl.empty();
 
     // 初始化草稿为当前已保存值
@@ -46,7 +60,7 @@ export class OssSettingTab extends PluginSettingTab {
       signedUrlExpireSeconds: String(plugin.settings.signedUrlExpireSeconds),
     };
 
-    containerEl.createEl("h2", { text: "阿里云 OSS 配置" });
+    new Setting(containerEl).setName("阿里云 OSS 配置").setHeading();
     containerEl.createEl("p", {
       text: "私有 Bucket + 客户端 Signature V4。AK/SK 使用主密码加密后随 Vault 同步，主密码只用于当前运行期解锁。",
       cls: "setting-item-description",
@@ -66,7 +80,7 @@ export class OssSettingTab extends PluginSettingTab {
             await plugin.unlockCredentials(this.masterPassword);
             this.masterPassword = "";
             new Notice("OSS 凭证已解锁");
-            this.display();
+            this.update();
           } catch (error) {
             new Notice(error instanceof Error ? error.message : String(error));
           }
@@ -78,7 +92,7 @@ export class OssSettingTab extends PluginSettingTab {
         .setDesc("解密后的 AK/SK 和派生密钥只存在于当前插件实例内存")
         .addButton((button) => button.setButtonText("立即锁定").onClick(() => {
           plugin.lockCredentials();
-          this.display();
+          this.update();
         }));
     } else if (plugin.needsCredentialEncryption()) {
       containerEl.createEl("p", {
@@ -110,7 +124,7 @@ export class OssSettingTab extends PluginSettingTab {
 
     // ─── 凭证区域（缓冲，不即时保存） ──────────────────────────────────────
 
-    containerEl.createEl("h3", { text: "OSS 凭证" });
+    new Setting(containerEl).setName("OSS 凭证").setHeading();
     containerEl.createEl("p", {
       text: "修改后需点击「保存并校验」，校验通过才会持久化。",
       cls: "setting-item-description",
@@ -212,7 +226,7 @@ export class OssSettingTab extends PluginSettingTab {
 
     // ─── 维护 ────────────────────────────────────────────────────────────────
 
-    containerEl.createEl("h3", { text: "维护" });
+    new Setting(containerEl).setName("维护").setHeading();
 
     const localCopiesSetting = new Setting(containerEl)
       .setName("本地保险副本")
@@ -236,7 +250,7 @@ export class OssSettingTab extends PluginSettingTab {
         b.setButtonText("立即重试").onClick(async () => {
           await this.runWhileActive(async () => {
             await plugin.retryPendingUploads();
-            this.display();
+            this.update();
           });
         }),
       );
@@ -253,7 +267,7 @@ export class OssSettingTab extends PluginSettingTab {
             }
             try {
               await plugin.uploadManager.cleanupOrphans();
-              this.display();
+              this.update();
             } catch (error) {
               if (error instanceof LifecycleQuiescedError) return;
               console.warn("[oss] 设置页清理孤儿分片失败", error);
@@ -324,7 +338,7 @@ export class OssSettingTab extends PluginSettingTab {
     } catch (err) {
       if (err instanceof LifecycleQuiescedError) throw err;
       notice.setMessage(formatCredentialNotice(err));
-      setTimeout(() => notice.hide(), 10000);
+      window.setTimeout(() => notice.hide(), 10000);
       return;
     }
     try {
@@ -337,11 +351,11 @@ export class OssSettingTab extends PluginSettingTab {
         signedUrlExpireSeconds: String(normalized.signedUrlExpireSeconds),
       };
       notice.setMessage("凭证校验通过，已保存");
-      setTimeout(() => notice.hide(), 3000);
+      window.setTimeout(() => notice.hide(), 3000);
     } catch (error) {
       if (error instanceof LifecycleQuiescedError) throw error;
       notice.setMessage(`凭证校验通过，但配置保存失败：${(error as Error).message}`);
-      setTimeout(() => notice.hide(), 10000);
+      window.setTimeout(() => notice.hide(), 10000);
     }
   }
 

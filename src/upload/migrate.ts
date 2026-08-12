@@ -130,7 +130,12 @@ export async function migrateAttachments(
     } else {
       try {
         lifecycle?.assertActive("删除已迁移本地附件");
-        await vault.delete(file);
+        const fileManager = plugin.app.fileManager;
+        if (fileManager) await fileManager.trashFile(file);
+        else {
+          const legacyDelete = Reflect.get(vault, "delete") as (file: TFile) => Promise<void>;
+          await legacyDelete.call(vault, file);
+        }
         await manager.finalizeCleanupForPath(file.path);
         done++;
       } catch (error) {
@@ -144,7 +149,7 @@ export async function migrateAttachments(
   }
 
   notice.setMessage(`迁移完成：成功 ${done}，失败 ${failed}`);
-  setTimeout(() => notice.hide(), 5000);
+  window.setTimeout(() => notice.hide(), 5000);
 }
 
 function confirmMigration(

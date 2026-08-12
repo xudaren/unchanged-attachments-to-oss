@@ -34,7 +34,7 @@ export class SignedUrlCache {
     if (this.map.has(key)) {
       this.map.delete(key);
     } else if (this.map.size >= this.maxSize) {
-      const oldest = this.map.keys().next().value as string | undefined;
+      const oldest = this.map.keys().next().value;
       if (oldest !== undefined) this.map.delete(oldest);
     }
     this.map.set(key, { url, expireAt });

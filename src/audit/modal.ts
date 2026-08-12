@@ -40,7 +40,7 @@ export async function runObjectAudit(context: AuditContext): Promise<void> {
     ]);
     if (!referencesAreComplete(scan)) {
       notice.setMessage(`核验中止：${describeScanFailures(scan)}，未生成删除结论`);
-      setTimeout(() => notice.hide(), 8000);
+      window.setTimeout(() => notice.hide(), 8000);
       return;
     }
     context.lifecycle?.assertActive("展示 OSS 核验结果");
@@ -97,13 +97,13 @@ async function deleteAfterRescan(context: AuditContext, selectedKeys: string[]):
   } catch (error) {
     if (error instanceof LifecycleQuiescedError) throw error;
     notice.setMessage("已取消删除：无法重新确认 OSS 对象状态");
-    setTimeout(() => notice.hide(), 8000);
+    window.setTimeout(() => notice.hide(), 8000);
     console.warn("[oss-audit] 删除前复核失败", error);
     return;
   }
   if (!referencesAreComplete(latestScan)) {
     notice.setMessage(`已取消删除：${describeScanFailures(latestScan)}`);
-    setTimeout(() => notice.hide(), 8000);
+    window.setTimeout(() => notice.hide(), 8000);
     return;
   }
   notice.hide();
@@ -166,7 +166,7 @@ class ObjectAuditModal extends Modal {
       .addButton((button) => button.setButtonText("关闭").onClick(() => this.close()))
       .addButton((button) => button
         .setButtonText("删除选中对象")
-        .setWarning()
+        .setDestructive()
         .onClick(async () => {
           if (this.selected.size === 0) {
             new Notice("请先选择需要删除的疑似垃圾对象");

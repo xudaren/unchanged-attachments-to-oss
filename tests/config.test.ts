@@ -61,6 +61,9 @@ test("rejects invalid storage identity and expiry values before persistence", ()
   assert.throws(() => normalizeObjectKeyPrefix("vault/../archive"), /路径段/);
   assert.throws(() => normalizeObjectKeyPrefix("uploading/archive"), /内部命名/);
   assert.throws(() => normalizeObjectKeyPrefix("vault/.oss-plugin-probe/archive"), /内部命名/);
+  assert.throws(() => normalizeObjectKeyPrefix("vault\u0000archive"), /控制字符/);
+  assert.throws(() => normalizeObjectKeyPrefix("vault\u001farchive"), /控制字符/);
+  assert.throws(() => normalizeObjectKeyPrefix("vault\u007farchive"), /控制字符/);
   assert.throws(() => normalizeSignedUrlExpiry(60), /61/);
   assert.throws(() => normalizeSignedUrlExpiry(604801), /604800/);
   assert.equal(defaultObjectKeyPrefix("uploading"), "uploading-attachments");

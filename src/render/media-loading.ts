@@ -32,7 +32,8 @@ export function loadImageNearViewport(
   image.loading = "lazy";
   const pending = { key, resolver, lease };
   pendingImages.set(image, pending);
-  const Observer = globalThis.IntersectionObserver;
+  const Observer = image.ownerDocument?.defaultView?.IntersectionObserver
+    ?? window.IntersectionObserver;
   if (typeof Observer !== "function") {
     attachImage(image, pending);
     return;
@@ -70,7 +71,8 @@ export function loadVideoNearViewport(
   pendingVideos.set(video, pending);
   interactiveStates.set(video, pending);
   installInteractionRefresh(video, pending);
-  const Observer = globalThis.IntersectionObserver;
+  const Observer = video.ownerDocument?.defaultView?.IntersectionObserver
+    ?? window.IntersectionObserver;
   if (typeof Observer !== "function") {
     attachVideo(video, pending);
     return;

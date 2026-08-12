@@ -1,3 +1,5 @@
+import { createElementInDocument } from "./create-element";
+
 const errorMarkers = new WeakMap<Element, HTMLElement>();
 
 /** Show one reusable, visible error marker without destroying the retryable OSS source. */
@@ -5,7 +7,7 @@ export function showOssRenderError(element: Element, key: string, message: strin
   element.setAttribute("data-oss-render-error", "true");
   let marker = errorMarkers.get(element);
   if (!marker) {
-    marker = element.ownerDocument.createElement("span");
+    marker = createElementInDocument(element.ownerDocument, "span");
     marker.className = "oss-render-error";
     errorMarkers.set(element, marker);
   }

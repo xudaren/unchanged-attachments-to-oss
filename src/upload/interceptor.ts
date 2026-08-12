@@ -6,6 +6,7 @@ import {
   TFile,
   Vault,
 } from "obsidian";
+import { normalizeError } from "../error";
 import { formatOssReference } from "../reference/codec";
 import { LifecycleGate, LifecycleQuiescedError } from "../lifecycle";
 import { PendingReferenceLocator, PendingUpload, PluginSettings, isSupportedExt } from "../types";
@@ -109,14 +110,18 @@ export class AttachmentInterceptor {
     this.editorEventsRegistered = true;
     this.metadataResolutionTracking = true;
     this.plugin.registerEvent(this.plugin.app.workspace.on("editor-paste", (event, editor, view) => {
-      if (view instanceof MarkdownView) {
-        this.startRoot(() => this.handlePaste(event, editor, view), "粘贴附件");
-      }
+      if (event.defaultPrevented || !(view instanceof MarkdownView)) return;
+      const files = clipboardFiles(event);
+      if (!this.shouldTakeOver(files)) return;
+      event.preventDefault();
+      this.startRoot(() => this.takeOverInput(files, event, editor, view), "粘贴附件");
     }));
     this.plugin.registerEvent(this.plugin.app.workspace.on("editor-drop", (event, editor, view) => {
-      if (view instanceof MarkdownView) {
-        this.startRoot(() => this.handleDrop(event, editor, view), "拖入附件");
-      }
+      if (event.defaultPrevented || !(view instanceof MarkdownView)) return;
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      if (!this.shouldTakeOver(files)) return;
+      event.preventDefault();
+      this.startRoot(() => this.takeOverInput(files, event, editor, view), "拖入附件");
     }));
     this.plugin.registerEvent(this.plugin.app.metadataCache.on("resolved", () => this.backlinks.markResolved()));
     this.plugin.registerEvent(this.plugin.app.vault.on("rename", () => this.backlinks.invalidate()));
@@ -139,7 +144,8 @@ export class AttachmentInterceptor {
       const factory = () => {
         const run = this.fallbackTail.then(() => {
           this.lifecycle?.assertActive("处理新落地附件");
-          return this.handleCreate(file as TFile);
+          if (!(file instanceof TFile)) return;
+          return this.handleCreate(file);
         });
         return run;
       };
@@ -152,26 +158,13 @@ export class AttachmentInterceptor {
     }));
   }
 
-  private async handlePaste(event: ClipboardEvent, editor: Editor, view: MarkdownView): Promise<void> {
-    if (!this.settings.autoUpload) return;
-    const files = clipboardFiles(event);
-    if (!this.canTakeOver(files)) return;
+  private shouldTakeOver(files: File[]): boolean {
+    if (!this.settings.autoUpload || !this.canTakeOver(files)) return false;
     if (shouldKeepInputLocal(files)) {
       new Notice("本批附件超过移动端安全内存上限，已交给 Obsidian 本地保存，不会自动发起网络上传");
-      return;
+      return false;
     }
-    await this.takeOverInput(files, event, editor, view);
-  }
-
-  private async handleDrop(event: DragEvent, editor: Editor, view: MarkdownView): Promise<void> {
-    if (!this.settings.autoUpload) return;
-    const files = Array.from(event.dataTransfer?.files ?? []);
-    if (!this.canTakeOver(files)) return;
-    if (shouldKeepInputLocal(files)) {
-      new Notice("本批附件超过移动端安全内存上限，已交给 Obsidian 本地保存，不会自动发起网络上传");
-      return;
-    }
-    await this.takeOverInput(files, event, editor, view);
+    return true;
   }
 
   private canTakeOver(files: File[]): boolean {
@@ -184,6 +177,8 @@ export class AttachmentInterceptor {
     editor: Editor,
     view: MarkdownView,
   ): Promise<void> {
+    // Idempotent for real events; also preserves the direct-call contract used by tests.
+    event.preventDefault();
     const sourcePath = view.file?.path ?? "";
     const prepared: PreparedInput[] = files.map((file) => {
       const tempId = crypto.randomUUID();
@@ -199,8 +194,6 @@ export class AttachmentInterceptor {
     // Start every OS-backed File read before returning control to the event source.
     const stagingPromises = prepared.map((input) => this.captureAndStage(input));
     insertAllPlaceholders(editor, prepared);
-    event.preventDefault();
-
     const staged = await Promise.allSettled(stagingPromises);
     const ready: StagedInput[] = [];
     // Byte safety is part of the admitted paste/drop operation. Even when the
@@ -336,7 +329,7 @@ export class AttachmentInterceptor {
       await this.manager.finalizeCleanupForPath(input.stagingPath);
       this.progress?.finish();
       notice.setMessage(`已上传：${input.name}`);
-      setTimeout(() => notice.hide(), 2000);
+      window.setTimeout(() => notice.hide(), 2000);
     } catch (error) {
       this.progress?.finish();
       notice.hide();
@@ -458,7 +451,7 @@ export class AttachmentInterceptor {
       if (pending) this.retryIndicator?.push(retryEntryFor(pending));
       new Notice(`上传失败且无法写入附件目录；staging 与占位已保留。上传错误：${errorMessage(uploadError)}`);
     } finally {
-      if (promotedPath) setTimeout(() => this.suppressedLocalPaths.delete(promotedPath!), 1000);
+      if (promotedPath) window.setTimeout(() => this.suppressedLocalPaths.delete(promotedPath!), 1000);
     }
   }
 
@@ -521,7 +514,7 @@ export class AttachmentInterceptor {
       console.error("[oss] 已捕获附件的最终本地保全失败", recoveryError, originalError);
       new Notice("附件已读取但 staging 与本地保全均失败；请立即重新粘贴或拖入原文件");
     } finally {
-      if (targetPath) setTimeout(() => this.suppressedLocalPaths.delete(targetPath!), 1000);
+      if (targetPath) window.setTimeout(() => this.suppressedLocalPaths.delete(targetPath!), 1000);
     }
   }
 
@@ -571,10 +564,10 @@ export class AttachmentInterceptor {
     if (final.confirmed && failed === 0 && remaining.length === 0 && unchanged) {
       try {
         this.lifecycle?.assertActive("删除已迁移本地附件");
-        await this.plugin.app.vault.delete(file);
+        await this.trashFile(file);
         await this.manager.finalizeCleanupForPath(file.path);
         notice.setMessage(`兜底上传完成：${file.name}（${initial.length} 个独立引用）`);
-      } catch (error) {
+      } catch {
         notice.setMessage(`OSS 引用已提交，但本地清理失败，可从任务中心重试：${file.name}`);
       }
     } else {
@@ -585,7 +578,7 @@ export class AttachmentInterceptor {
           : "附件内容已变化";
       notice.setMessage(`兜底上传未清理本地：${failed} 个失败；${reason}`);
     }
-    setTimeout(() => notice.hide(), 4000);
+    window.setTimeout(() => notice.hide(), 4000);
   }
 
   private async uploadAndCommitOccurrence(
@@ -728,7 +721,7 @@ export class AttachmentInterceptor {
       }
       try {
         this.lifecycle?.assertActive("删除已迁移本地附件");
-        await this.plugin.app.vault.delete(currentFile);
+        await this.trashFile(currentFile);
         await this.manager.finalizeCleanupForPath(localPath);
         new Notice(`重试成功：${localPath}`);
       } catch (error) {
@@ -828,7 +821,7 @@ export class AttachmentInterceptor {
       await this.plugin.app.vault.adapter.rename(path, targetPath);
       return targetPath;
     } finally {
-      setTimeout(() => this.suppressedLocalPaths.delete(targetPath), 1000);
+      window.setTimeout(() => this.suppressedLocalPaths.delete(targetPath), 1000);
     }
   }
 
@@ -953,7 +946,18 @@ export class AttachmentInterceptor {
       throw new Error(`staging 修改时间已变化，已保留：${path}`);
     }
     this.lifecycle?.assertActive("删除本地附件");
-    await this.plugin.app.vault.delete(file);
+    await this.trashFile(file);
+  }
+
+  private async trashFile(file: TFile): Promise<void> {
+    const fileManager = this.plugin.app.fileManager;
+    if (fileManager) {
+      await fileManager.trashFile(file);
+      return;
+    }
+    // Unit-test doubles predating FileManager; real Obsidian always takes the branch above.
+    const legacyDelete = Reflect.get(this.plugin.app.vault, "delete") as (file: TFile) => Promise<void>;
+    await legacyDelete.call(this.plugin.app.vault, file);
   }
 
   private startRoot(factory: () => Promise<void>, label: string): void {
@@ -961,7 +965,7 @@ export class AttachmentInterceptor {
     try {
       task = this.lifecycle ? this.lifecycle.run(factory) : factory();
     } catch (error) {
-      task = Promise.reject(error);
+      task = Promise.reject(normalizeError(error));
     }
     void task.catch((error) => {
       if (error instanceof LifecycleQuiescedError) return;
@@ -1106,5 +1110,5 @@ async function waitForOccurrences(
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }

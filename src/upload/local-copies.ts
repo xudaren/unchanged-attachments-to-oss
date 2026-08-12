@@ -127,7 +127,7 @@ export class LocalInsuranceCopiesModal extends Modal {
           await this.run(() => this.actions.restore(copy.path));
           await this.render();
         }))
-        .addButton((button) => button.setButtonText("永久删除").setWarning().onClick(() => {
+        .addButton((button) => button.setButtonText("永久删除").setDestructive().onClick(() => {
           new ConfirmDeleteLocalCopyModal(this.app, copy, async () => {
             await this.run(() => this.actions.remove(copy.path));
             await this.render();
@@ -162,7 +162,7 @@ class ConfirmDeleteLocalCopyModal extends Modal {
     });
     new Setting(this.contentEl)
       .addButton((button) => button.setButtonText("取消").onClick(() => this.close()))
-      .addButton((button) => button.setButtonText("确认永久删除").setWarning().onClick(async () => {
+      .addButton((button) => button.setButtonText("确认永久删除").setDestructive().onClick(async () => {
         this.close();
         await this.confirmDelete();
       }));

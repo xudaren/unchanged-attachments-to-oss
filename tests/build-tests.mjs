@@ -37,6 +37,7 @@ await esbuild.build({
   platform: "node",
   target: "node20",
   outdir: ".test-dist",
+  banner: { js: "globalThis.window ??= globalThis;" },
   alias: { obsidian: "./tests/stubs/obsidian.ts" },
   logLevel: "warning",
 });

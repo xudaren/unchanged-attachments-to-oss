@@ -19,6 +19,25 @@
   font-size: var(--font-ui-small);
 }
 
+.oss-delete-list {
+  max-height: 260px;
+  margin-bottom: 12px;
+  overflow: auto;
+}
+
+.oss-autoupload-indicator,
+.oss-retry-indicator {
+  cursor: pointer;
+}
+
+.oss-is-hidden {
+  display: none;
+}
+
+.oss-rendered-video {
+  max-width: 100%;
+}
+
 .modal.oss-audit-modal-shell {
   width: min(760px, calc(100vw - 32px));
   max-width: calc(100vw - 32px);
@@ -149,7 +168,7 @@
   max-width: 100%;
 }
 
-.oss-media-caption-host:has(> audio),
+.oss-audio-caption-host,
 .oss-audio-live-preview-host,
 .oss-pdf-attachment {
   width: 100%;
@@ -172,12 +191,12 @@
   max-width: 100%;
 }
 
-.oss-media-caption-host:has(> audio) {
+.oss-audio-caption-host {
   align-items: flex-start;
 }
 
-.oss-media-caption-host:has(> audio) > audio,
-.oss-media-caption-host:has(> audio) > .oss-media-label,
+.oss-audio-caption-host > audio,
+.oss-audio-caption-host > .oss-media-label,
 .oss-audio-live-preview-host > .oss-media-label {
   width: 100%;
   max-width: 100%;
@@ -239,63 +258,36 @@
   transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
-/* Live Preview wraps embeds in shrink-to-content hosts. Expand the host as well
-   as the card so its 100% width means the full editor line. */
-.markdown-source-view .cm-embed-block:has(.oss-pdf-attachment),
-.markdown-source-view .internal-embed:has(.oss-pdf-attachment),
-.markdown-source-view .image-embed:has(.oss-pdf-attachment) {
-  display: block;
-  width: 100%;
-  max-width: 100%;
-  box-sizing: border-box;
-}
-
-.markdown-source-view .cm-line:has(.oss-pdf-attachment) {
-  width: 100%;
-}
-
-/* Audio has the same shrink-to-content Live Preview wrappers as PDF. */
-.markdown-source-view .cm-embed-block:has(.oss-audio-live-preview-host),
-.markdown-source-view .internal-embed:has(.oss-audio-live-preview-host),
-.markdown-source-view .image-embed:has(.oss-audio-live-preview-host),
-.markdown-source-view .cm-line:has(.oss-audio-live-preview-host) {
-  display: block;
-  width: 100%;
-  max-width: 100%;
-  box-sizing: border-box;
-}
-
-/* Explicit renderer classes cover Obsidian versions where the OSS source is
-   an img placeholder nested inside the embed and :has() cannot identify it. */
+/* The renderer marks the exact Live Preview owners to avoid reverse DOM scans. */
 .markdown-source-view .oss-audio-live-preview-block,
 .markdown-source-view .oss-audio-live-preview-wrapper,
 .markdown-source-view .oss-audio-live-preview-host,
 .markdown-source-view .oss-audio-live-preview-line {
-  display: block !important;
-  width: 100% !important;
-  max-width: 100% !important;
+  display: block;
+  width: 100%;
+  max-width: 100%;
   box-sizing: border-box;
   overflow: visible;
 }
 
 .markdown-source-view .oss-pdf-live-preview-wrapper {
-  display: flex !important;
-  width: 100% !important;
-  max-width: 100% !important;
+  display: flex;
+  width: 100%;
+  max-width: 100%;
   box-sizing: border-box;
 }
 
 .markdown-source-view .oss-pdf-live-preview-wrapper > .oss-pdf-attachment {
-  width: 100% !important;
-  max-width: 100% !important;
+  width: 100%;
+  max-width: 100%;
 }
 
 .markdown-source-view .oss-audio-live-preview-host > audio,
 .markdown-source-view .oss-audio-live-preview-wrapper > audio,
 .markdown-source-view .oss-audio-live-preview-host .oss-media-caption-host > audio {
-  width: 100% !important;
-  min-width: 0 !important;
-  max-width: 100% !important;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* Added by the renderer without replacing CodeMirror's editable host nodes. */
