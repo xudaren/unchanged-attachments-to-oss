@@ -1,5 +1,72 @@
 # Unchanged Attachments to OSS
 
+An Obsidian plugin that automatically uploads attachments (images, videos, audio, PDFs) to Aliyun OSS, stores them as permanent `oss://` references, and renders them with dynamically signed URLs. Solves multi-device sync and sharing challenges for large media files.
+
+## Features
+
+- **Auto Upload**: Paste or drag attachments to automatically upload to OSS
+- **V4 Dynamic Signing**: Secure access to private buckets with auto-cached, auto-renewed signed URLs
+- **Encrypted Credential Sync**: AK/SK encrypted with master password-derived key (AES-GCM), syncs with Vault without exposing secrets
+- **Cross-Platform**: Works on PC (Windows/macOS) and mobile (iOS/Android)
+- **Resumable Uploads**: Network interruptions preserve staging and multipart state for recovery
+- **Explicit Deletion**: Right-click menu and file menu provide linked deletion; native delete won't touch OSS
+- **Migration Tool**: Migrate local attachments to OSS in bulk or by folder
+- **Status Bar**: Shows upload status and progress, click to toggle auto-upload
+
+Supported formats: images (png/jpg/jpeg/gif/webp/avif/svg/bmp), videos (mp4/mov/webm/mkv/ogv/m4v), audio (mp3/wav/m4a/ogg/flac/aac/opus), and PDF. Markdown, Canvas, and Base files stay in Vault.
+
+## Installation
+
+### From Community Plugins
+
+1. Open Obsidian Settings → Community Plugins
+2. Search for "Unchanged Attachments to OSS"
+3. Install and enable
+
+### Manual Installation
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/xudaren/unchanged-attachments-to-oss/releases)
+2. Create a folder `unchanged-attachments-to-oss` in your vault's `.obsidian/plugins/` directory
+3. Place the three files in that folder
+4. Restart Obsidian and enable the plugin in Settings → Community Plugins
+
+## Configuration
+
+| Field | Required | Description |
+|---|---|---|
+| `region` | Yes | V4 signing region, e.g., `cn-hangzhou` |
+| `bucketName` | Yes | OSS bucket name |
+| `accessKeyId` | Yes | Aliyun Access Key ID |
+| `accessKeySecret` | Yes | Aliyun Access Key Secret |
+| `endpoint` | No | OSS endpoint hostname (auto-derived from region) |
+| `objectKeyPrefix` | Yes | Prefix for all object keys |
+| `signedUrlExpireSeconds` | No | Signed URL validity (61–604800s, default 3600) |
+| `autoUpload` | No | Toggle auto-upload (default: enabled) |
+
+On first save, you'll set a master password (min 10 chars). The plugin uses PBKDF2-SHA256 to derive an AES-256 key and encrypts AK/SK with AES-GCM. Only ciphertext is stored in Vault.
+
+## Usage
+
+- **Paste**: `Ctrl+V` to paste and auto-upload
+- **Drag & Drop**: Drop files into editor to upload
+- **Preview**: Reading View and Live Preview render signed URLs automatically
+- **Delete**: Right-click attachments or use file menu for linked deletion
+
+## Technical Notes
+
+- Uses only Obsidian `requestUrl` for HTTP (mobile compatible)
+- Uses only Web Crypto for OSS Signature V4 (no Node.js dependencies)
+- Multipart upload with 4MB chunks for resumability
+- Signed URL caching (LRU) for performance
+
+## License
+
+MIT
+
+---
+
+# 中文说明
+
 【Obsidian 插件】将常用不可变附件（图片/视频/音频/PDF）自动上传到阿里云 OSS，以永久 `oss://` 引用保存，并在渲染时动态生成临时签名 URL，解决多端同步和共享问题。
 
 ## 功能特性
