@@ -955,9 +955,8 @@ export class AttachmentInterceptor {
       await fileManager.trashFile(file);
       return;
     }
-    // Unit-test doubles predating FileManager; real Obsidian always takes the branch above.
-    const legacyDelete = Reflect.get(this.plugin.app.vault, "delete") as (file: TFile) => Promise<void>;
-    await legacyDelete.call(this.plugin.app.vault, file);
+    // Minimal unit-test doubles may omit FileManager.
+    await Reflect.apply(Reflect.get(this.plugin.app.vault, "delete"), this.plugin.app.vault, [file]);
   }
 
   private startRoot(factory: () => Promise<void>, label: string): void {

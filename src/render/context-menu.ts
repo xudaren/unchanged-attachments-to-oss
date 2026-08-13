@@ -1,5 +1,5 @@
 import { Menu, Modal, Notice, Plugin, TFile } from "obsidian";
-import { formatOssReference, removeFirstOssReference, scanOssReferences } from "../reference/codec";
+import { removeFirstOssReference, scanOssReferences } from "../reference/codec";
 import type { LeaseUrlResolver } from "./url-resolver";
 import { isUrlResolverDisposed, resolveUrlLease } from "./url-resolver";
 import { createElementInDocument } from "./create-element";
@@ -174,19 +174,6 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
       .onClick(() => {
         if (this.active) void this.openSignedUrl(element, data);
       }));
-    menu.addItem((item) => item
-      .setTitle(`复制${label}访问链接（会过期）`)
-      .setIcon("link")
-      .onClick(() => {
-        if (this.active) void this.copySignedUrl(element, data);
-      }));
-    menu.addItem((item) => item
-      .setTitle("复制 OSS Markdown 引用")
-      .setIcon("copy")
-      .onClick(() => {
-        if (this.active) void copyText(formatOssReference(data.key), "已复制 OSS Markdown 引用");
-      }));
-
     const sourcePath = this.resolveSourcePath(element, data.sourcePath);
     if (sourcePath) {
       menu.addSeparator();
@@ -245,17 +232,6 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
       else window.open(lease.url, "_blank", "noopener,noreferrer");
     } catch {
       popup?.close();
-      new Notice("无法生成临时访问链接，请检查 OSS 配置");
-    }
-  }
-
-  private async copySignedUrl(element: HTMLElement, data: ContextData): Promise<void> {
-    if (!this.active) return;
-    try {
-      const lease = await resolveUrlLease(this.getResolver(), data.key);
-      if (!this.isCurrent(element, data)) return;
-      await copyText(lease.url, "已复制临时访问链接（签名过期后失效）");
-    } catch {
       new Notice("无法生成临时访问链接，请检查 OSS 配置");
     }
   }
@@ -344,13 +320,4 @@ class OssImagePreviewModal extends Modal {
 
 export function removeOssReference(content: string, key: string): { content: string; removed: boolean } {
   return removeFirstOssReference(content, key);
-}
-
-async function copyText(value: string, successMessage: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(value);
-    new Notice(successMessage);
-  } catch {
-    new Notice("复制失败，请检查系统剪贴板权限");
-  }
 }

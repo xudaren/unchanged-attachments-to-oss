@@ -171,7 +171,7 @@ function escapeMarkdownLabel(value: string): string {
 }
 
 function unescapeMarkdownLabel(value: string): string {
-  return value.replace(/\\([\[\]\\])/g, "$1");
+  return value.replace(/\\([[\]\\])/g, "$1");
 }
 
 interface TextRange {

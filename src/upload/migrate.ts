@@ -132,10 +132,7 @@ export async function migrateAttachments(
         lifecycle?.assertActive("删除已迁移本地附件");
         const fileManager = plugin.app.fileManager;
         if (fileManager) await fileManager.trashFile(file);
-        else {
-          const legacyDelete = Reflect.get(vault, "delete") as (file: TFile) => Promise<void>;
-          await legacyDelete.call(vault, file);
-        }
+        else await Reflect.apply(Reflect.get(vault, "delete"), vault, [file]);
         await manager.finalizeCleanupForPath(file.path);
         done++;
       } catch (error) {

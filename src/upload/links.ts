@@ -534,7 +534,7 @@ function altFromOriginal(original: string): string {
 }
 
 function unescapeAlt(value: string): string {
-  return value.replace(/\\([\[\]\\])/g, "$1");
+  return value.replace(/\\([[\]\\])/g, "$1");
 }
 
 function findUnescaped(value: string, char: string, from: number): number {

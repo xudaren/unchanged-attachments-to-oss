@@ -22,7 +22,7 @@ Obsidian/Electron 规范化出的 `oss:///%E8...` 必须先恢复为原始 Objec
 
 媒体渲染必须避免无意义的 OSS 数据流量：PDF 卡片只挂载可点击的签名链接，未点击时不得请求 PDF 内容；音频挂载签名 URL 时必须使用 `preload="none"`，允许原生播放器正常识别音源但不得预下载音频内容；视频只在进入视口附近时挂载签名 URL 并使用 `preload="metadata"` 读取小段数据展示首帧，视口外不得提前请求；图片只在进入视口附近时挂载签名 URL，不可见的长文档和 Canvas 图片不得提前下载。延迟图片占位节点必须保留非零布局区域，禁止用 `display:none` 造成可见性观察死锁。环境不支持可见性观察时允许立即加载图片和视频，以保证兼容性。Live Preview 中 Obsidian 未生成原生媒体元素、只生成带 `src` 的 `.internal-embed` 时，插件必须保留该可编辑宿主并在其内部挂载正确的媒体元素。
 
-OSS 附件的右键菜单由插件统一接管，禁止让 Obsidian 将视频、音频和 PDF 显示为“复制图片 / Remove image / 重置大小”。菜单只保存 Object Key 与可验证的来源定位，不得长期保存签名 URL；打开、复制临时链接和图片预览必须在点击时重新签名。菜单项必须按图片、视频、音频、PDF 显示对应名称，提供打开附件、复制临时访问链接、复制永久 `oss://` Markdown 引用；仅在能确认来源 Markdown 与具体引用实例时提供“移除引用”。Canvas 永不提供移除引用，Live Preview 禁止回退猜测当前活动 Markdown。移除时必须按当前唯一 Object Key 先确认是否联动删除；用户选择保留 OSS 时只移除引用，用户确认联动删除时先删除 OSS Object，只有远端明确成功才精确删除一个 Markdown 引用。网络、Bucket 不存在、Endpoint 错误或 OSS 删除失败时必须保留本文档引用。
+OSS 附件的右键菜单由插件统一接管，禁止让 Obsidian 将视频、音频和 PDF 显示为“复制图片 / Remove image / 重置大小”。菜单只保存 Object Key 与可验证的来源定位，不得长期保存签名 URL；打开附件和图片预览必须在点击时重新签名。菜单项必须按图片、视频、音频、PDF 显示对应名称；禁止读写系统剪贴板，避免插件获得 Vault 外部剪贴板内容的访问能力；仅在能确认来源 Markdown 与具体引用实例时提供“移除引用”。Canvas 永不提供移除引用，Live Preview 禁止回退猜测当前活动 Markdown。移除时必须按当前唯一 Object Key 先确认是否联动删除；用户选择保留 OSS 时只移除引用，用户确认联动删除时先删除 OSS Object，只有远端明确成功才精确删除一个 Markdown 引用。网络、Bucket 不存在、Endpoint 错误或 OSS 删除失败时必须保留本文档引用。
 
 ## 约束
 

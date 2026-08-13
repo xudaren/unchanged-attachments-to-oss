@@ -2,7 +2,7 @@
   "id": "unchanged-attachments-to-oss",
   "name": "Unchanged Attachments to OSS",
   "version": "0.1.1",
-  "minAppVersion": "1.5.7",
+  "minAppVersion": "1.13.0",
   "description": "Automatically upload images, audio, video, and PDFs to Aliyun OSS. Store as permanent oss:// references with dynamic signed URL rendering.",
   "author": "xukai",
   "authorUrl": "https://github.com/xukai",

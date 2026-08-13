@@ -166,7 +166,7 @@ class ObjectAuditModal extends Modal {
       .addButton((button) => button.setButtonText("关闭").onClick(() => this.close()))
       .addButton((button) => button
         .setButtonText("删除选中对象")
-        .setDestructive()
+        .setWarning()
         .onClick(async () => {
           if (this.selected.size === 0) {
             new Notice("请先选择需要删除的疑似垃圾对象");
@@ -220,7 +220,7 @@ class ObjectAuditModal extends Modal {
     for (const key of this.report.missing) {
       const item = list.createEl("li");
       item.createEl("code", { text: key });
-      item.createEl("span", { text: ` · ${this.report.referenced.get(key)?.join("、") ?? ""}` });
+      item.createSpan({ text: ` · ${this.report.referenced.get(key)?.join("、") ?? ""}` });
     }
   }
 }
