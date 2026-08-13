@@ -33,8 +33,9 @@ rm -f manifest.json.bak
 echo "Building..."
 npm run build
 
-# Commit changes
-git add package.json package-lock.json manifest.json main.js
+# Commit changes (use -f for main.js since it's in .gitignore)
+git add package.json package-lock.json manifest.json
+git add -f main.js
 git commit -m "release: v$NEW_VERSION"
 
 # Create and push tag
