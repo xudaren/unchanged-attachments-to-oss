@@ -37,7 +37,20 @@ await esbuild.build({
   platform: "node",
   target: "node20",
   outdir: ".test-dist",
-  banner: { js: "globalThis.window ??= globalThis;" },
+  banner: { js: `
+globalThis.window ??= globalThis;
+Object.defineProperty(Object.prototype, "createDocumentFragment", {
+  configurable: true,
+  value() {
+    const doc = this;
+    return { createEl: (tag, options) => {
+      const element = doc.createElement(tag);
+      if (typeof options === "string") element.className = options;
+      return element;
+    } };
+  },
+});
+` },
   alias: { obsidian: "./tests/stubs/obsidian.ts" },
   logLevel: "warning",
 });

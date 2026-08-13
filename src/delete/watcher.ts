@@ -216,7 +216,7 @@ class ConfirmReferenceRemovalModal extends Modal {
         }))
       .addButton((b) => b
         .setButtonText("删除 OSS 并移除引用")
-        .setWarning()
+        .setDestructive()
         .onClick(async () => {
           this.close();
           await this.onConfirm();
@@ -269,7 +269,7 @@ class ConfirmDocumentDeletionModal extends Modal {
       .addButton((b) =>
         b
           .setButtonText("删除文档")
-          .setWarning()
+          .setDestructive()
           .onClick(async () => {
             this.close();
             await this.onConfirm(Array.from(selected));

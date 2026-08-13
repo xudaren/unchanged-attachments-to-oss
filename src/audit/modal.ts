@@ -166,7 +166,7 @@ class ObjectAuditModal extends Modal {
       .addButton((button) => button.setButtonText("关闭").onClick(() => this.close()))
       .addButton((button) => button
         .setButtonText("删除选中对象")
-        .setWarning()
+        .setDestructive()
         .onClick(async () => {
           if (this.selected.size === 0) {
             new Notice("请先选择需要删除的疑似垃圾对象");

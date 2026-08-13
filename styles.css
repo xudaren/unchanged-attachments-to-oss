@@ -34,6 +34,58 @@
   display: none;
 }
 
+.oss-settings-root.setting-item {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+}
+
+.oss-settings-root .setting-item {
+  min-width: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.oss-settings-root .setting-item-info {
+  min-width: 0;
+}
+
+.oss-settings-root .setting-item-heading,
+.oss-settings-root > .setting-item-description {
+  margin-left: 24px;
+  margin-right: 24px;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.oss-settings-root .setting-item-control {
+  flex: 0 1 auto;
+}
+
+@media (max-width: 480px) {
+  .oss-settings-root .setting-item {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .oss-settings-root .setting-item-control {
+    width: 100%;
+  }
+
+  .oss-settings-root .setting-item-control input {
+    width: 100%;
+  }
+
+  .oss-settings-root .setting-item-heading,
+  .oss-settings-root > .setting-item-description {
+    margin-left: 0;
+    margin-right: 0;
+  }
+}
+
 .oss-rendered-video {
   max-width: 100%;
 }

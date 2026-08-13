@@ -29,6 +29,10 @@ function record(type: MutationRecordType, target: Node, addedNodes: Node[] = [])
   return { type, target, addedNodes } as unknown as MutationRecord;
 }
 
+function documentDouble(create: (tag: string) => unknown) {
+  return { createDocumentFragment: () => ({ createEl: create }) };
+}
+
 test("selects only the changed media element for src and href mutations", () => {
   const image = node(1, "IMG");
   const anchor = node(1, "A");
@@ -117,12 +121,10 @@ function mediaElement(tagName: string, source: string) {
         ? ({} as Element)
         : null
     ),
-    ownerDocument: {
-      createElement: () => ({
+    ownerDocument: documentDouble(() => ({
         dataset: {} as Record<string, string>,
         remove: () => { errorMarker = null; },
-      }),
-    },
+      })),
     insertAdjacentElement: (_position: string, marker: typeof errorMarker) => {
       errorMarker = marker;
       return marker;
@@ -170,12 +172,10 @@ test("hydrates only the supplied OSS image subtree", async () => {
 
 test("replaces an Obsidian image placeholder with the actual media type", async () => {
   const image = mediaElement("IMG", "oss://vault/a.mp4") as ReturnType<typeof mediaElement> & {
-    ownerDocument?: { createElement(tag: string): unknown };
+    ownerDocument?: ReturnType<typeof documentDouble>;
     replacement?: { tagName: string; src: string; preload: string; dispatch(name: string): void };
   };
-  image.ownerDocument = {
-    createElement: (tag: string) => mediaElement(tag.toUpperCase(), ""),
-  };
+  image.ownerDocument = documentDouble((tag) => mediaElement(tag.toUpperCase(), ""));
 
   await hydrateOssSubtree(image as unknown as ParentNode, {
     resolve: async () => "https://signed.example/vault/a.mp4",
@@ -188,12 +188,10 @@ test("replaces an Obsidian image placeholder with the actual media type", async 
 
 test("replaces an Obsidian image placeholder with an interactive audio player", async () => {
   const image = mediaElement("IMG", "oss://vault/a.mp3") as ReturnType<typeof mediaElement> & {
-    ownerDocument?: { createElement(tag: string): unknown };
+    ownerDocument?: ReturnType<typeof documentDouble>;
     replacement?: { tagName: string; src: string; preload: string; dispatch(name: string): void };
   };
-  image.ownerDocument = {
-    createElement: (tag: string) => mediaElement(tag.toUpperCase(), ""),
-  };
+  image.ownerDocument = documentDouble((tag) => mediaElement(tag.toUpperCase(), ""));
   image.setAttribute("alt", "访谈录音.mp3");
   const embedClasses: string[] = [];
   const wrapperClasses: string[] = [];
