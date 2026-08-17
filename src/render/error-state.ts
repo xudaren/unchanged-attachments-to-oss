@@ -1,4 +1,4 @@
-import { createElementInDocument } from "./create-element";
+import { createElementLike } from "./create-element";
 
 const errorMarkers = new WeakMap<Element, HTMLElement>();
 
@@ -7,7 +7,7 @@ export function showOssRenderError(element: Element, key: string, message: strin
   element.setAttribute("data-oss-render-error", "true");
   let marker = errorMarkers.get(element);
   if (!marker) {
-    marker = createElementInDocument(element.ownerDocument, "span");
+    marker = createElementLike(element, "span");
     marker.className = "oss-render-error";
     errorMarkers.set(element, marker);
   }

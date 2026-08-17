@@ -1,5 +1,5 @@
 import { formatOssUrl } from "../reference/codec";
-import { createElementInDocument } from "./create-element";
+import { createElementLike } from "./create-element";
 import { clearOssRenderError, showOssRenderError } from "./error-state";
 import { ossKeyFromImageSource } from "./oss-source";
 import { defaultPdfRenderer, PdfRenderer } from "./pdf-link";
@@ -225,7 +225,7 @@ function restoreCanonicalRenderSource(
 ): HTMLElement {
   const canonicalSource = formatOssUrl(key);
   if (mediaKind(key) === "embed" && !isLivePreviewEmbedHost(element) && !isNativePdfPlaceholder(element)) {
-    const placeholder = createElementInDocument(element.ownerDocument, "img");
+    const placeholder = createElementLike(element, "img");
     if (displayName) placeholder.setAttribute("alt", displayName);
     placeholder.setAttribute("src", canonicalSource);
     element.replaceWith(placeholder);
@@ -433,7 +433,7 @@ function isLivePreviewEmbedHost(element: Element): boolean {
 function mountInLivePreviewSlot(host: HTMLElement, media: HTMLElement): HTMLElement {
   let slot = host.querySelector<HTMLElement>(":scope > .oss-render-slot");
   if (!slot) {
-    slot = createElementInDocument(host.ownerDocument, "span");
+    slot = createElementLike(host, "span");
     slot.className = "oss-render-slot";
     host.appendChild(slot);
   }
@@ -472,21 +472,20 @@ function buildMediaElement(
   resolver: UrlResolver,
   pdfRenderer: PdfRenderer,
 ): HTMLElement {
-  const doc = from.ownerDocument;
   if (kind === "img") {
-    const image = createElementInDocument(doc, "img");
+    const image = createElementLike(from, "img");
     image.alt = from.getAttribute("alt") ?? "";
     image.setAttribute("src", formatOssUrl(key));
     return image;
   }
   if (kind === "video") {
-    const video = createElementInDocument(doc, "video");
+    const video = createElementLike(from, "video");
     video.controls = true;
     video.setAttribute("class", "oss-rendered-video");
     return video;
   }
   if (kind === "audio") {
-    const audio = createElementInDocument(doc, "audio");
+    const audio = createElementLike(from, "audio");
     audio.controls = true;
     return audio;
   }

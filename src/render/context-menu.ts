@@ -2,7 +2,7 @@ import { Menu, Modal, Notice, Plugin, TFile } from "obsidian";
 import { removeFirstOssReference, scanOssReferences } from "../reference/codec";
 import type { LeaseUrlResolver } from "./url-resolver";
 import { isUrlResolverDisposed, resolveUrlLease } from "./url-resolver";
-import { createElementInDocument } from "./create-element";
+import { createElementLike } from "./create-element";
 
 export type AttachmentKind = "img" | "video" | "audio" | "pdf";
 
@@ -127,7 +127,7 @@ export class OssAttachmentContextMenu implements AttachmentContextMenuBinder {
     // its AbortSignal has already invalidated that detached click listener.
     existing?.remove();
 
-    const button = createElementInDocument(image.ownerDocument, "button");
+    const button = createElementLike(image, "button");
     this.ownedPreviewButtons.add(button);
     button.type = "button";
     button.className = "oss-image-zoom-button clickable-icon";

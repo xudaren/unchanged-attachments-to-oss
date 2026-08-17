@@ -1,6 +1,6 @@
 import type { LeaseUrlResolver, SignedUrlLease } from "./url-resolver";
 import { resolveUrlLease } from "./url-resolver";
-import { createElementInDocument } from "./create-element";
+import { createElementLike } from "./create-element";
 
 export interface PdfRenderer {
   mount(
@@ -14,35 +14,35 @@ export interface PdfRenderer {
 }
 
 export function buildPdfLink(
-  doc: Document,
+  host: Node,
   url: string,
   key: string,
   displayName?: string,
   resolver?: LeaseUrlResolver,
   initialLease?: SignedUrlLease,
 ): HTMLElement {
-  const attachment = createElementInDocument(doc, "div");
+  const attachment = createElementLike(host, "div");
   attachment.className = "oss-pdf-attachment";
   attachment.dataset.ossKey = key;
 
-  const badge = createElementInDocument(doc, "span");
+  const badge = createElementLike(host, "span");
   badge.className = "oss-pdf-badge";
   badge.textContent = "PDF";
 
-  const details = createElementInDocument(doc, "span");
+  const details = createElementLike(host, "span");
   details.className = "oss-pdf-details";
 
-  const name = createElementInDocument(doc, "span");
+  const name = createElementLike(host, "span");
   name.className = "oss-pdf-name";
   name.textContent = normalizeDisplayName(displayName) || decodeFileName(key);
   name.title = name.textContent;
 
-  const meta = createElementInDocument(doc, "span");
+  const meta = createElementLike(host, "span");
   meta.className = "oss-pdf-meta";
   meta.textContent = "PDF 文档";
   details.append(name, meta);
 
-  const open = createElementInDocument(doc, "a");
+  const open = createElementLike(host, "a");
   open.className = "oss-pdf-open";
   open.href = url;
   open.target = "_blank";
@@ -65,13 +65,16 @@ export function buildPdfLink(
     open.addEventListener("focus", warm);
     open.addEventListener("click", (event) => {
       event.preventDefault();
-      const popup = doc.defaultView?.open("", "_blank", "noopener,noreferrer") ?? null;
+      const win = (host as Element).ownerDocument?.defaultView
+        ?? ((host as Node).nodeType === 9 ? (host as Document).defaultView : null)
+        ?? null;
+      const popup = win?.open("", "_blank", "noopener,noreferrer") ?? null;
       void resolveUrlLease(resolver, key, lease).then(
         (next) => {
           lease = next;
           open.href = next.url;
           if (popup) popup.location.replace(next.url);
-          else doc.defaultView?.open(next.url, "_blank", "noopener,noreferrer");
+          else win?.open(next.url, "_blank", "noopener,noreferrer");
         },
         () => popup?.close(),
       );
@@ -84,7 +87,7 @@ export function buildPdfLink(
 
 export const defaultPdfRenderer: PdfRenderer = {
   mount(from, url, key, displayName, resolver, lease) {
-    return buildPdfLink(from.ownerDocument, url, key, displayName ?? displayNameFromElement(from), resolver, lease);
+    return buildPdfLink(from, url, key, displayName ?? displayNameFromElement(from), resolver, lease);
   },
 };
 

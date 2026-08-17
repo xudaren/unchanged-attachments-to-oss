@@ -30,7 +30,10 @@ function record(type: MutationRecordType, target: Node, addedNodes: Node[] = [])
 }
 
 function documentDouble(create: (tag: string) => unknown) {
-  return { createDocumentFragment: () => ({ createEl: create }) };
+  return {
+    createDocumentFragment: () => ({ createEl: create }),
+    createElement: create,
+  };
 }
 
 test("selects only the changed media element for src and href mutations", () => {

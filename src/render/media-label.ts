@@ -1,4 +1,4 @@
-import { createElementInDocument } from "./create-element";
+import { createElementLike } from "./create-element";
 
 export function mediaDisplayName(source: Element): string {
   const alt = source.getAttribute("alt")?.trim();
@@ -24,7 +24,7 @@ export function mountMediaLabel(media: HTMLElement, name: string, key: string, h
     existing.title = name;
     return existing;
   }
-  const label = createElementInDocument(media.ownerDocument, "div");
+  const label = createElementLike(media, "div");
   label.className = "oss-media-label";
   label.dataset.ossKey = key;
   label.textContent = name;
@@ -41,7 +41,7 @@ function resolveMediaContainer(media: HTMLElement, explicit?: Element): HTMLElem
   const parent = media.parentElement;
   if (parent?.classList.contains("oss-media-caption-host")) return parent;
   if (!parent) return null;
-  const frame = createElementInDocument(media.ownerDocument, "div");
+  const frame = createElementLike(media, "div");
   frame.className = "oss-media-caption-host";
   frame.dataset.ossMediaFrame = "true";
   media.replaceWith(frame);
