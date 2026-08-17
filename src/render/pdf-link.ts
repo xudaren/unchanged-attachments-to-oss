@@ -65,9 +65,7 @@ export function buildPdfLink(
     open.addEventListener("focus", warm);
     open.addEventListener("click", (event) => {
       event.preventDefault();
-      const win = (host as Element).ownerDocument?.defaultView
-        ?? ((host as Node).nodeType === 9 ? (host as Document).defaultView : null)
-        ?? null;
+      const win = host.ownerDocument?.defaultView ?? null;
       const popup = win?.open("", "_blank", "noopener,noreferrer") ?? null;
       void resolveUrlLease(resolver, key, lease).then(
         (next) => {

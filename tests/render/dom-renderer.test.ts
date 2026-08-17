@@ -11,6 +11,14 @@ import {
   selectMutationRoots,
 } from "../../src/render/dom-renderer";
 
+interface DomElementInfoLike {
+  cls?: string | string[];
+  text?: string;
+  attr?: Record<string, string | number | boolean | null>;
+  title?: string;
+  href?: string;
+}
+
 function node(
   nodeType: number,
   tagName?: string,
@@ -114,11 +122,19 @@ function mediaElement(tagName: string, source: string) {
   const attributes = new Map<string, string>([[tagName === "A" ? "href" : "src", source]]);
   let errorMarker: { className?: string; textContent?: string | null; remove(): void } | null = null;
   const listeners = new Map<string, Set<(event: { key?: string }) => void>>();
-  const element = {
+  const children: unknown[] = [];
+  const classSet = new Set<string>();
+  const element: Record<string, unknown> = {
     nodeType: 1,
     tagName,
     dataset: {} as Record<string, string>,
     style: {} as Record<string, string>,
+    children,
+    classList: {
+      contains: (name: string) => classSet.has(name),
+      add: (name: string) => { classSet.add(name); },
+      remove: (name: string) => { classSet.delete(name); },
+    },
     closest: (selector: string) => (
       selector.includes("markdown-source-view") || selector.includes("canvas-node")
         ? ({} as Element)
@@ -133,6 +149,8 @@ function mediaElement(tagName: string, source: string) {
       return marker;
     },
     querySelectorAll: () => [],
+    matches: () => false,
+    querySelector: () => null,
     getAttribute: (name: string) => attributes.get(name) ?? null,
     setAttribute: (name: string, value: string) => attributes.set(name, value),
     removeAttribute: (name: string) => attributes.delete(name),
@@ -149,6 +167,66 @@ function mediaElement(tagName: string, source: string) {
     },
     play: async () => undefined,
     replaceWith(replacement: unknown) { (this as { replacement?: unknown }).replacement = replacement; },
+    remove() {
+      const parent = (this as { parentElement?: { children?: unknown[] } }).parentElement;
+      if (parent?.children) {
+        const i = parent.children.indexOf(this);
+        if (i >= 0) parent.children.splice(i, 1);
+      }
+      (this as { parentElement?: unknown }).parentElement = undefined;
+    },
+    append(...items: unknown[]) {
+      children.push(...items);
+      for (const item of items) {
+        if (item && typeof item === "object") (item as { parentElement?: unknown }).parentElement = element;
+      }
+    },
+    createEl(tag: string, options?: DomElementInfoLike | string) {
+      // Delegate creation to ownerDocument.createElement so tests can swap
+      // in specialized element factories (e.g. mediaElement with src setters).
+      const doc = element.ownerDocument as { createElement?: (tag: string) => unknown };
+      const child = doc.createElement?.(tag) ?? {
+        tagName: tag.toUpperCase(),
+        className: "",
+        textContent: "",
+        dataset: {} as Record<string, string>,
+        children: [] as unknown[],
+        append() {},
+        setAttribute() {},
+        getAttribute() { return null; },
+        remove() {},
+      };
+      // Inherit the parent's ownerDocument so cross-element creation
+      // (e.g. hydrate creating an AUDIO from an IMG's host) uses the same
+      // document double that the test installed on the parent.
+      if (child && typeof child === "object") {
+        (child as { ownerDocument?: unknown }).ownerDocument = element.ownerDocument;
+      }
+      if (typeof options === "string") (child as { className?: string }).className = options;
+      else if (options) {
+        if (options.cls) (child as { className?: string }).className = typeof options.cls === "string" ? options.cls : options.cls.join(" ");
+        if (options.text !== undefined) (child as { textContent?: unknown }).textContent = options.text;
+        if (options.title !== undefined) (child as { title?: string }).title = options.title;
+        if (options.href !== undefined) (child as { href?: string }).href = options.href;
+        if (options.attr) {
+          for (const [key, value] of Object.entries(options.attr)) {
+            if (value === null) continue;
+            (child as { setAttribute?: (k: string, v: string) => void }).setAttribute?.(key, String(value));
+          }
+        }
+      }
+      children.push(child);
+      if (child && typeof child === "object") (child as { parentElement?: unknown }).parentElement = element;
+      if (typeof (child as { remove?: () => void }).remove === "function") {
+        const originalRemove = (child as { remove: () => void }).remove.bind(child);
+        (child as { remove: () => void }).remove = () => {
+          const i = children.indexOf(child);
+          if (i >= 0) children.splice(i, 1);
+          originalRemove();
+        };
+      }
+      return child;
+    },
     get src() { return attributes.get("src") ?? ""; },
     set src(value: string) { attributes.set("src", value); },
     get href() { return attributes.get("href") ?? ""; },

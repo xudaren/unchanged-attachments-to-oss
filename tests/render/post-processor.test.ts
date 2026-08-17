@@ -16,6 +16,16 @@ function image(source: string) {
         remove: () => { errorMarker = null; },
       }),
     },
+    createEl: (tag: string) => {
+      const child: Record<string, unknown> = {
+        tagName: tag.toUpperCase(),
+        className: "",
+        textContent: "",
+        dataset: {} as Record<string, string>,
+        remove() { errorMarker = null; },
+      };
+      return child;
+    },
     insertAdjacentElement: (_position: string, marker: typeof errorMarker) => {
       errorMarker = marker;
       return marker;
