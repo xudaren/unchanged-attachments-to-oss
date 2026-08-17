@@ -195,3 +195,43 @@ test("refreshes an audio lease when playback starts after a generation change", 
   assert.equal(media.src, "https://signed.example/1.mp3");
   cancelMediaLoading(media);
 });
+
+test("disconnectMediaLoading removes interaction listeners from every registered media element", () => {
+  const listenersA = new Map<string, () => void>();
+  const listenersB = new Map<string, () => void>();
+  const attributesA = new Map<string, string>();
+  const attributesB = new Map<string, string>();
+  const mediaA = {
+    tagName: "AUDIO",
+    preload: "auto",
+    getAttribute: (name: string) => attributesA.get(name) ?? null,
+    get src() { return attributesA.get("src") ?? ""; },
+    set src(value: string) { attributesA.set("src", value); },
+    addEventListener: (name: string, listener: () => void) => listenersA.set(name, listener),
+    removeEventListener: (name: string) => listenersA.delete(name),
+  } as unknown as HTMLMediaElement;
+  const mediaB = {
+    tagName: "AUDIO",
+    preload: "auto",
+    getAttribute: (name: string) => attributesB.get(name) ?? null,
+    get src() { return attributesB.get("src") ?? ""; },
+    set src(value: string) { attributesB.set("src", value); },
+    addEventListener: (name: string, listener: () => void) => listenersB.set(name, listener),
+    removeEventListener: (name: string) => listenersB.delete(name),
+  } as unknown as HTMLMediaElement;
+
+  const activeResolver: LeaseUrlResolver = {
+    resolve: async () => "https://signed.example/1.mp3",
+    resolveLease: async () => lease("https://signed.example/1.mp3", 1),
+    isLeaseCurrent: () => true,
+  };
+  loadMediaOnInteraction(mediaA, "vault/a.mp3", activeResolver, lease("https://signed.example/1.mp3", 1));
+  loadMediaOnInteraction(mediaB, "vault/b.mp3", activeResolver, lease("https://signed.example/1.mp3", 1));
+  assert.ok(listenersA.size > 0, "fixture: mediaA has listeners installed");
+  assert.ok(listenersB.size > 0, "fixture: mediaB has listeners installed");
+
+  disconnectMediaLoading();
+
+  assert.equal(listenersA.size, 0, "mediaA listeners must be removed on disconnect");
+  assert.equal(listenersB.size, 0, "mediaB listeners must be removed on disconnect");
+});

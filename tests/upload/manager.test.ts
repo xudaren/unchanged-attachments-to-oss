@@ -8,6 +8,7 @@ import {
   StorageIdentityMismatchError,
   UploadManager,
   UploadPausedError,
+  UploadSourceChangedError,
 } from "../../src/upload/manager";
 import { DEFAULT_SETTINGS } from "../../src/types";
 
@@ -64,12 +65,12 @@ test("keeps completed object state until reference commit is finalized", async (
   const manager = new UploadManager(client as never, settings, async () => undefined);
 
   const first = await manager.upload({
-    blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", localPath: "image.png",
+    blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", localPath: "image.png", sourceMtime: 100,
   });
   assert.equal(settings.pendingUploads[first.tempId]?.phase, "uploaded");
 
   const resumed = await manager.upload({
-    blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", localPath: "image.png",
+    blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", localPath: "image.png", sourceMtime: 100,
   });
   assert.equal(resumed.objectKey, first.objectKey);
   assert.equal(initiateCount, 1);
@@ -130,6 +131,7 @@ test("journals a staged task before any network request", async () => {
     displayName: "image.png",
     occurrenceId: "task-1",
     locator,
+    sourceMtime: 100,
   });
   await manager.upload({
     blob: new Blob(["data"]),
@@ -139,6 +141,7 @@ test("journals a staged task before any network request", async () => {
     tempId: "task-1",
     occurrenceId: "task-1",
     locator,
+    sourceMtime: 100,
   });
 
   assert.equal(order[0], "persist");
@@ -232,17 +235,17 @@ test("canonicalizes storage identity and blocks a real target switch before netw
   };
   const settings = { ...DEFAULT_SETTINGS, pendingUploads: {}, objectKeyPrefix: "vault", bucketName: "bucket-one" };
   const manager = new UploadManager(client as never, settings, async () => undefined);
-  const first = await manager.upload({ blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", localPath: "a.png" });
+  const first = await manager.upload({ blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", localPath: "a.png", sourceMtime: 100 });
   await manager.markCleanupPending(first.tempId);
 
   settings.region = "cn-hangzhou";
   settings.endpoint = "oss-cn-hangzhou.aliyuncs.com";
-  await manager.upload({ blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", localPath: "a.png" });
+  await manager.upload({ blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", localPath: "a.png", sourceMtime: 100 });
   assert.equal(initiateCount, 1, "legacy and canonical region/endpoint forms are one identity");
 
   settings.bucketName = "bucket-two";
   await assert.rejects(
-    manager.upload({ blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", localPath: "a.png" }),
+    manager.upload({ blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", localPath: "a.png", sourceMtime: 100 }),
     StorageIdentityMismatchError,
   );
   assert.equal(initiateCount, 1);
@@ -416,7 +419,7 @@ test("automatic upload pauses before Initiate while manual retry still works", a
   const manager = new UploadManager(client as never, settings, async () => undefined);
 
   await assert.rejects(
-    manager.upload({ blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", automatic: true }),
+    manager.upload({ blob: new Blob(["data"]), ext: "png", sourcePath: "note.md", automatic: true, sourceMtime: 100 }),
     UploadPausedError,
   );
   const paused = Object.values(settings.pendingUploads)[0];
@@ -428,6 +431,7 @@ test("automatic upload pauses before Initiate while manual retry still works", a
     ext: "png",
     sourcePath: "note.md",
     tempId: paused.tempId,
+    sourceMtime: 100,
   });
   assert.equal(initiateCount, 1);
   assert.equal(settings.pendingUploads[result.tempId].phase, "uploaded");
@@ -484,6 +488,7 @@ test("in-flight Complete may persist uploaded state while next generation waits 
     parts: [{ partNumber: 1, etag: '"etag"' }],
     phase: "completing" as const,
     sourcePath: "note.md",
+    sourceMtime: 100,
     storageIdentity: {
       region: "cn-hangzhou",
       bucketName: "bucket-one",
@@ -511,6 +516,7 @@ test("in-flight Complete may persist uploaded state while next generation waits 
     ext: "png",
     sourcePath: "note.md",
     resume: pending,
+    sourceMtime: 100,
   }));
   await completeSent.promise;
   lifecycle.quiesce();
@@ -556,6 +562,7 @@ test("quiesce before Complete send preserves completing state without request or
     parts: [{ partNumber: 1, etag: '"etag"' }],
     phase: "completing" as const,
     sourcePath: "note.md",
+    sourceMtime: 100,
     storageIdentity: {
       region: "cn-hangzhou",
       bucketName: "bucket-one",
@@ -589,6 +596,7 @@ test("quiesce before Complete send preserves completing state without request or
     ext: "png",
     sourcePath: "note.md",
     resume: pending,
+    sourceMtime: 100,
   }));
   lifecycle.quiesce();
   await assert.rejects(work, (error: unknown) =>
@@ -617,4 +625,175 @@ test("rejects a legacy leading-slash prefix before any OSS request", async () =>
 
   assert.equal(networkCount, 0);
   assert.equal(Object.keys(settings.pendingUploads).length, 0);
+});
+
+test("serializes concurrent upload() calls that resume the same pending task", async () => {
+  let initiateCount = 0;
+  const firstInitiateBlocked = deferred();
+  const client = {
+    initiateMultipart: async () => {
+      initiateCount++;
+      if (initiateCount === 1) await firstInitiateBlocked.promise;
+      return { uploadId: `upload-${initiateCount}` };
+    },
+    uploadPart: async () => ({ etag: '"etag-1"' }),
+    completeMultipart: async ({ key }: { key: string }) => ({ key, etag: '"done"', requestId: "r-1" }),
+  };
+  const settings = { ...DEFAULT_SETTINGS, pendingUploads: {}, objectKeyPrefix: "vault" };
+  const manager = new UploadManager(client as never, settings, async () => undefined);
+  const shared = {
+    blob: new Blob(["data"]),
+    ext: "png",
+    sourcePath: "note.md",
+    localPath: "image.png",
+    occurrenceId: "note.md#0",
+  };
+
+  const first = manager.upload(shared);
+  // Let the first caller reach the blocked initiateMultipart before the second enters.
+  await new Promise((r) => setTimeout(r, 0));
+  const second = manager.upload(shared);
+  firstInitiateBlocked.resolve();
+
+  const [ra, rb] = await Promise.all([first, second]);
+  assert.equal(initiateCount, 1, "initiateMultipart must run exactly once for the same pending task");
+  assert.equal(ra.objectKey, rb.objectKey);
+  assert.equal(ra.tempId, rb.tempId);
+  const pending = settings.pendingUploads[ra.tempId];
+  assert.equal(pending.parts.length, 1, "only one upload should have contributed parts");
+});
+
+test("rejects resume when the pending journal has no source mtime", async () => {
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    bucketName: "bucket",
+    objectKeyPrefix: "vault",
+    pendingUploads: {},
+  };
+  const pending = {
+    tempId: "task",
+    objectKey: "vault/a.png",
+    uploadId: "upload-1",
+    ext: "png",
+    size: 4,
+    parts: [{ partNumber: 1, etag: '"etag-1"' }],
+    phase: "uploading" as const,
+    sourcePath: "note.md",
+    localPath: "image.png",
+    storageIdentity: {
+      region: "cn-hangzhou",
+      bucketName: "bucket",
+      endpoint: "oss-cn-hangzhou.aliyuncs.com",
+      objectKeyPrefix: "vault",
+    },
+    createdAt: 1,
+    updatedAt: 1,
+    // sourceMtime intentionally absent (legacy journal)
+  };
+  settings.pendingUploads = { task: pending };
+  const manager = new UploadManager({} as never, settings, async () => undefined);
+
+  await assert.rejects(
+    manager.upload({
+      blob: new Blob(["data"]),
+      ext: "png",
+      sourcePath: "note.md",
+      resume: pending,
+      sourceMtime: 100,
+    }),
+    UploadSourceChangedError,
+  );
+});
+
+test("rejects resume when the incoming request omits source mtime", async () => {
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    bucketName: "bucket",
+    objectKeyPrefix: "vault",
+    pendingUploads: {},
+  };
+  const pending = {
+    tempId: "task",
+    objectKey: "vault/a.png",
+    uploadId: "upload-1",
+    ext: "png",
+    size: 4,
+    parts: [{ partNumber: 1, etag: '"etag-1"' }],
+    phase: "uploading" as const,
+    sourcePath: "note.md",
+    localPath: "image.png",
+    sourceMtime: 100,
+    storageIdentity: {
+      region: "cn-hangzhou",
+      bucketName: "bucket",
+      endpoint: "oss-cn-hangzhou.aliyuncs.com",
+      objectKeyPrefix: "vault",
+    },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  settings.pendingUploads = { task: pending };
+  const manager = new UploadManager({} as never, settings, async () => undefined);
+
+  await assert.rejects(
+    manager.upload({
+      blob: new Blob(["data"]),
+      ext: "png",
+      sourcePath: "note.md",
+      resume: pending,
+      // sourceMtime intentionally omitted
+    }),
+    UploadSourceChangedError,
+  );
+});
+
+test("bindLocalRecovery retries a transient persist failure so the journal stays aligned with the md reference", async () => {
+  let persistCalls = 0;
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    bucketName: "bucket",
+    objectKeyPrefix: "vault",
+    pendingUploads: {},
+  };
+  const pending = {
+    tempId: "task",
+    objectKey: "vault/a.png",
+    uploadId: "upload-1",
+    ext: "png",
+    size: 4,
+    parts: [{ partNumber: 1, etag: '"etag-1"' }],
+    phase: "uploading" as const,
+    sourcePath: "note.md",
+    storageIdentity: {
+      region: "cn-hangzhou",
+      bucketName: "bucket",
+      endpoint: "oss-cn-hangzhou.aliyuncs.com",
+      objectKeyPrefix: "vault",
+    },
+    sourceMtime: 100,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  settings.pendingUploads = { task: pending };
+  const manager = new UploadManager({} as never, settings, async () => {
+    persistCalls++;
+    if (persistCalls === 1) throw new Error("disk full");
+  });
+  const locator = {
+    kind: "attachment" as const,
+    sourcePath: "note.md",
+    original: "![a](image.png)",
+    start: 0,
+    end: 15,
+    alt: "a",
+    before: "",
+    after: "",
+  };
+
+  await manager.bindLocalRecovery("task", "image.png", locator, 200);
+
+  assert.equal(persistCalls, 2, "bindLocalRecovery must retry a transient persist failure");
+  assert.equal(pending.localPath, "image.png");
+  assert.equal(pending.sourceMtime, 200);
+  assert.equal(pending.locator, locator);
 });

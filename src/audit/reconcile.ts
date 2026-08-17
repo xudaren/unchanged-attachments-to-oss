@@ -61,7 +61,11 @@ export async function scanVaultReferences(
       if (index >= files.length) return;
       const file = files[index];
       try {
-        const content = await vault.cachedRead(file);
+        // `read` bypasses MetadataCache so freshly rewritten references are
+        // seen before the cache is invalidated; cachedRead could surface a
+        // stale snapshot and cause a live reference to be mis-reported as
+        // orphaned by the audit.
+        const content = await vault.read(file);
         for (const key of extractReferenceKeys(content, options.targetKeys)) {
           const sources = referenced.get(key) ?? [];
           sources.push(file.path);

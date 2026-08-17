@@ -53,7 +53,7 @@ test("scans reference files with bounded concurrency and reports read failures",
   const progress: number[] = [];
   const vault = {
     getFiles: () => files,
-    cachedRead: async (file: TFile) => {
+    read: async (file: TFile) => {
       active++;
       peak = Math.max(peak, active);
       await new Promise((resolve) => setTimeout(resolve, 1));
@@ -72,6 +72,22 @@ test("scans reference files with bounded concurrency and reports read failures",
   assert.deepEqual([...result.referenced.keys()].sort(), ["vault/base.pdf", "vault/canvas.pdf", "vault/md.pdf"]);
   assert.deepEqual(result.failedPaths, ["broken.md"]);
   assert.equal(progress.at(-1), 4, "unsupported files are excluded from scan totals");
+});
+
+test("scanVaultReferences reads disk directly so a stale MetadataCache cannot hide a live reference", async () => {
+  const files = [new TFile("note.md")];
+  const vault = {
+    getFiles: () => files,
+    // cachedRead returns a stale snapshot with no reference.
+    cachedRead: async () => "# no reference here",
+    // read returns the fresh content with the live oss:// reference.
+    read: async () => "![](oss://vault/live.pdf)",
+  };
+
+  const result = await scanVaultReferences(vault as never);
+
+  assert.deepEqual([...result.referenced.keys()], ["vault/live.pdf"]);
+  assert.deepEqual(result.referenced.get("vault/live.pdf"), ["note.md"]);
 });
 
 test("reconciles orphaned, missing, pending and internal objects by key", () => {

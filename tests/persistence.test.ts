@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createPersistedSettingsSnapshot } from "../src/persistence";
+import { createPersistedSettingsSnapshot, persistOrRetry } from "../src/persistence";
 import { DEFAULT_SETTINGS } from "../src/types";
 
 test("persistence strips runtime plaintext credentials once encrypted storage is active", () => {
@@ -33,4 +33,31 @@ test("persistence preserves a legacy plaintext file until encrypted migration su
   const snapshot = createPersistedSettingsSnapshot(settings, true);
   assert.equal(snapshot.accessKeyId, "legacy-id");
   assert.equal(snapshot.accessKeySecret, "legacy-secret");
+});
+
+test("persistOrRetry returns on the first successful save", async () => {
+  let calls = 0;
+  await persistOrRetry(async () => { calls++; });
+  assert.equal(calls, 1);
+});
+
+test("persistOrRetry recovers from a single transient save failure", async () => {
+  let calls = 0;
+  await persistOrRetry(async () => {
+    calls++;
+    if (calls === 1) throw new Error("disk full");
+  });
+  assert.equal(calls, 2);
+});
+
+test("persistOrRetry surfaces the latest error after exhausting retries", async () => {
+  let calls = 0;
+  await assert.rejects(
+    persistOrRetry(async () => {
+      calls++;
+      throw new Error(`fail-${calls}`);
+    }),
+    /fail-2/,
+  );
+  assert.equal(calls, 2);
 });

@@ -56,6 +56,25 @@ test("scanner ignores frontmatter, comments, fenced code and inline code", () =>
   assert.deepEqual(scanOssReferences(content).map((reference) => reference.key), ["vault/real.png"]);
 });
 
+test("scanner does not truncate frontmatter at a block-scalar --- inside YAML", () => {
+  const real = formatOssReference("vault/real.png", "real");
+  const fake = formatOssReference("vault/fake.png", "fake");
+  // YAML block scalar whose body contains a line that looks like a frontmatter
+  // closing marker. The real closing --- is on the last frontmatter line.
+  // fake lives inside frontmatter and must be excluded.
+  const content = [
+    "---",
+    "title: notes",
+    "description: |",
+    `  excerpt: ${fake}`,
+    "  ---",
+    "  some literal text",
+    "---",
+    real,
+  ].join("\n");
+  assert.deepEqual(scanOssReferences(content).map((reference) => reference.key), ["vault/real.png"]);
+});
+
 test("removes only one matching occurrence and can prefer a source offset", () => {
   const first = formatOssReference("vault/a.png", "first");
   const second = formatOssReference("vault/a.png", "second");

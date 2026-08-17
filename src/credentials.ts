@@ -112,9 +112,14 @@ function validateEnvelope(value: EncryptedCredentials): void {
 }
 
 async function deriveKey(password: string, salt: Uint8Array, iterations: number): Promise<CryptoKey> {
+  // Normalize to NFC so passwords that look identical but use different
+  // Unicode code-point sequences (e.g. precomposed é vs e + combining acute
+  // from mobile keyboards) derive the same key. Otherwise a user who typed
+  // their password on a device that produced NFD input could never decrypt.
+  const normalized = password.normalize("NFC");
   const material = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(password),
+    encoder.encode(normalized),
     "PBKDF2",
     false,
     ["deriveKey"],

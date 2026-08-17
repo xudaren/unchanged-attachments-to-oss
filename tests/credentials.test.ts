@@ -67,3 +67,16 @@ test("prompts for legacy migration or encrypted unlock at startup", () => {
     isUnlocked: true,
   }), null);
 });
+
+test("normalizes the master password to NFC so equivalent Unicode forms decrypt the same ciphertext", async () => {
+  // NFD: e + combining acute (two code units) vs NFC: é (single code unit).
+  // Mobile keyboards may produce either form; both must derive the same key.
+  const nfcPassword = "café-staple-password";
+  const nfdPassword = "café-staple-password";
+  assert.notEqual(nfcPassword, nfdPassword, "fixture sanity: NFD and NFC must differ byte-wise");
+  assert.equal(nfcPassword.normalize("NFC"), nfdPassword.normalize("NFC"));
+
+  const { encrypted } = await encryptCredentials(credentials, nfcPassword, 100_000);
+  const decrypted = await decryptCredentials(encrypted, nfdPassword);
+  assert.deepEqual(decrypted.credentials, credentials);
+});

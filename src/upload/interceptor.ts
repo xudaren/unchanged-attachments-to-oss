@@ -536,8 +536,20 @@ export class AttachmentInterceptor {
     const notice = new Notice(`兜底上传：${file.name}`, 0);
     const blob = new Blob([await this.plugin.app.vault.readBinary(file)]);
     let failed = 0;
+    let abortedForSourceMutation = false;
 
     for (const occurrence of initial) {
+      // Guard against mid-loop source mutation. If the md was rewritten since
+      // we captured the locator, a score-based match could replace the wrong
+      // occurrence. Abort the loop early instead of risking silent corruption.
+      const sourceFile = this.plugin.app.vault.getAbstractFileByPath(occurrence.sourcePath);
+      if (sourceFile instanceof TFile) {
+        const current = await this.plugin.app.vault.cachedRead(sourceFile);
+        if (current.slice(occurrence.locator.start, occurrence.locator.end) !== occurrence.locator.original) {
+          abortedForSourceMutation = true;
+          break;
+        }
+      }
       try {
         await this.uploadAndCommitOccurrence(file, blob, occurrence, originalMtime);
       } catch (error) {
@@ -561,7 +573,7 @@ export class AttachmentInterceptor {
     const final = await this.finalOccurrences(file, metadataBaseline);
     const remaining = final.occurrences;
     const unchanged = file.stat.size === originalSize && file.stat.mtime === originalMtime;
-    if (final.confirmed && failed === 0 && remaining.length === 0 && unchanged) {
+    if (final.confirmed && failed === 0 && remaining.length === 0 && unchanged && !abortedForSourceMutation) {
       try {
         this.lifecycle?.assertActive("删除已迁移本地附件");
         await this.trashFile(file);
@@ -571,11 +583,13 @@ export class AttachmentInterceptor {
         notice.setMessage(`OSS 引用已提交，但本地清理失败，可从任务中心重试：${file.name}`);
       }
     } else {
-      const reason = !final.confirmed
-        ? "MetadataCache 未在安全窗口内稳定，无法确认是否有新增引用"
-        : remaining.length > 0
-          ? `检测到 ${remaining.length} 个新增/未完成引用`
-          : "附件内容已变化";
+      const reason = abortedForSourceMutation
+        ? "引用文档在上传期间被外部修改，已中止后续替换以避免错误定位"
+        : !final.confirmed
+          ? "MetadataCache 未在安全窗口内稳定，无法确认是否有新增引用"
+          : remaining.length > 0
+            ? `检测到 ${remaining.length} 个新增/未完成引用`
+            : "附件内容已变化";
       notice.setMessage(`兜底上传未清理本地：${failed} 个失败；${reason}`);
     }
     window.setTimeout(() => notice.hide(), 4000);

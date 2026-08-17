@@ -45,7 +45,7 @@ import {
   isEncryptedCredentials,
   reencryptCredentials,
 } from "./credentials";
-import { createPersistedSettingsSnapshot } from "./persistence";
+import { createPersistedSettingsSnapshot, persistOrRetry } from "./persistence";
 import { CredentialStartupModal } from "./credential-modal";
 
 export default class OssPlugin extends Plugin {
@@ -429,18 +429,7 @@ export default class OssPlugin extends Plugin {
       throw new Error("未完成任务的存储身份无法确认，请恢复原配置后重试");
     }
 
-    const previous: NormalizedOssConfig = {
-      region: this.settings.region,
-      bucketName: this.settings.bucketName,
-      accessKeyId: this.settings.accessKeyId,
-      accessKeySecret: this.settings.accessKeySecret,
-      endpoint: this.settings.endpoint,
-      objectKeyPrefix: this.settings.objectKeyPrefix,
-      signedUrlExpireSeconds: this.settings.signedUrlExpireSeconds,
-    };
     const previousEncrypted = this.settings.encryptedCredentials;
-    const previousKey = this.credentialKey;
-    const previousLegacyState = this.legacyPlaintextLoaded;
     let encrypted: EncryptedCredentials;
     let nextKey = this.credentialKey;
     if (nextKey && previousEncrypted) {
@@ -455,15 +444,11 @@ export default class OssPlugin extends Plugin {
     this.credentialKey = nextKey;
     this.legacyPlaintextLoaded = false;
     this.installRuntimeConfig(config);
-    try {
-      await this.saveSettings();
-    } catch (error) {
-      this.settings.encryptedCredentials = previousEncrypted;
-      this.credentialKey = previousKey;
-      this.legacyPlaintextLoaded = previousLegacyState;
-      this.installRuntimeConfig(previous);
-      throw error;
-    }
+    // Persist with an immediate retry. A single transient save failure can
+    // leave disk holding a partial new ciphertext; retrying before any
+    // memory rollback keeps disk aligned with the in-memory key, so a later
+    // reload can still decrypt persisted state.
+    await persistOrRetry(() => this.saveSettings());
   }
 
   hasEncryptedCredentials(): boolean {

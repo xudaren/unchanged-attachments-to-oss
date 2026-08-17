@@ -430,10 +430,16 @@ interface TextRange {
 function markdownExcludedRanges(content: string): TextRange[] {
   const ranges: TextRange[] = [];
   if (content.startsWith("---\n") || content.startsWith("---\r\n")) {
-    const end = content.search(/\r?\n---(?:\r?\n|$)/);
-    if (end >= 0) {
-      const closing = content.indexOf("---", end + 1);
-      ranges.push({ start: 0, end: closing + 3 });
+    // Search for the closing --- only after the opening line, and only at
+    // the start of a line (multiline ^). This prevents a YAML block scalar
+    // whose body contains an indented "---" line from being misidentified
+    // as the frontmatter terminator.
+    const firstLineEnd = content.indexOf("\n") + 1;
+    const rest = content.slice(firstLineEnd);
+    const closingMatch = rest.match(/^---(?:\r?\n|$)/m);
+    if (closingMatch) {
+      const closingIndex = firstLineEnd + closingMatch.index!;
+      ranges.push({ start: 0, end: closingIndex + 3 });
     }
   }
   collectRanges(content, /<!--[\s\S]*?-->/g, ranges);

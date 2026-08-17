@@ -17,7 +17,13 @@ export function clipboardFiles(event: ClipboardEvent): File[] {
     .filter((file): file is File => Boolean(file));
   const listed = Array.from(data?.files ?? []);
   const combined = itemFiles.length > 0 ? [...itemFiles, ...listed] : listed;
-  return combined.filter((file, index) => combined.indexOf(file) === index);
+  const seen = new Set<string>();
+  return combined.filter((file) => {
+    const key = `${file.size}|${file.type}|${file.name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export function isInternalStagingPath(path: string): boolean {

@@ -81,6 +81,11 @@ export function loadVideoNearViewport(
 }
 
 const mediaCleanup = new WeakMap<Element, () => void>();
+// Track every element that has interaction listeners installed, so the global
+// disconnect can enumerate and clean them up. WeakMap alone is not iterable,
+// and leaking these listeners across plugin reloads pins the previous
+// generation's SignedUrlResolver (and its cached credentials) in memory.
+const interactiveElements = new Set<Element>();
 
 export function cancelMediaLoading(element: Element): void {
   imageObserver?.unobserve(element);
@@ -89,9 +94,15 @@ export function cancelMediaLoading(element: Element): void {
   pendingVideos.delete(element);
   mediaCleanup.get(element)?.();
   mediaCleanup.delete(element);
+  interactiveElements.delete(element);
 }
 
 export function disconnectMediaLoading(): void {
+  for (const element of interactiveElements) {
+    mediaCleanup.get(element)?.();
+    mediaCleanup.delete(element);
+  }
+  interactiveElements.clear();
   imageObserver?.disconnect();
   imageObserver = null;
   videoObserver?.disconnect();
@@ -177,6 +188,7 @@ function installInteractionRefresh(media: HTMLMediaElement, state: PendingMedia)
   media.addEventListener?.("keydown", refresh);
   media.addEventListener?.("play", refresh);
   media.addEventListener?.("seeking", refresh);
+  interactiveElements.add(media);
   mediaCleanup.set(media, () => {
     media.removeEventListener?.("pointerdown", refresh);
     media.removeEventListener?.("keydown", refresh);

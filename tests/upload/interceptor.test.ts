@@ -103,6 +103,21 @@ test("merges clipboard item files with the authoritative file list", () => {
   assert.deepEqual(clipboardFiles(event as never), [image, archive]);
 });
 
+test("deduplicates clipboard files by size+type+name when sources yield different references", () => {
+  const a = { name: "clipboard.png", type: "image/png", size: 1234 } as File;
+  const b = { name: "clipboard.png", type: "image/png", size: 1234 } as File;
+  const event = {
+    clipboardData: {
+      items: [{ kind: "file", getAsFile: () => a }],
+      files: [b],
+    },
+  };
+
+  const result = clipboardFiles(event as never);
+  assert.equal(result.length, 1);
+  assert.equal(result[0], a);
+});
+
 test("recognizes the durable staging namespace so create fallback cannot re-upload it", () => {
   assert.equal(isInternalStagingPath(".oss-plugin-staging"), true);
   assert.equal(isInternalStagingPath(".oss-plugin-staging/task.png.stage"), true);

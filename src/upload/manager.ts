@@ -3,6 +3,7 @@ import { normalizeObjectKeyPrefix, normalizeOssEndpoint } from "../config";
 import { OssClient, OssError } from "../oss/client";
 import { normalizeSigningRegion } from "../oss/signer";
 import { LifecycleGate, LifecycleQuiescedError } from "../lifecycle";
+import { persistOrRetry } from "../persistence";
 import {
   PendingReferenceLocator,
   PendingUpload,
@@ -95,6 +96,7 @@ export class UploadSourceChangedError extends Error {
 /** Durable Multipart state machine shared by direct input, fallback and migration. */
 export class UploadManager {
   private persistTail: Promise<void> = Promise.resolve();
+  private readonly activeUploads = new Map<string, Promise<UploadResult>>();
 
   constructor(
     private client: OssClient,
@@ -146,21 +148,14 @@ export class UploadManager {
 
   async upload(req: UploadRequest): Promise<UploadResult> {
     this.lifecycle?.assertActive("开始上传任务");
-    const beforeSend = req.automatic
-      ? () => this.assertAutomaticUploadEnabled(req)
-      : undefined;
-    const size = req.blob.size;
-    const totalParts = Math.max(1, Math.ceil(size / PART_SIZE));
-    if (totalParts > MAX_PARTS) {
-      throw new Error(`附件过大：固定 4 MB 分片最多支持 ${MAX_PARTS} 片`);
-    }
 
+    // Synchronous segment: locate or create the pending entry so we can acquire
+    // a per-tempId mutex. Without this, two concurrent upload() calls for the
+    // same attachment could both pass findResume() and race through initiate,
+    // producing two uploadIds that corrupt pending.parts.
     let pending = req.resume ?? this.findResume(req);
-    if (pending) {
-      if (!pending.storageIdentity && req.automatic) this.assertAutomaticUploadEnabled(req);
-      await this.ensureTaskStorageIdentity(pending, beforeSend);
-      this.assertResumeSource(pending, req);
-    } else {
+    let mustPersistCreation = false;
+    if (!pending) {
       const tempId = req.tempId ?? crypto.randomUUID();
       const prefix = normalizeObjectKeyPrefix(this.settings.objectKeyPrefix);
       pending = {
@@ -168,7 +163,7 @@ export class UploadManager {
         objectKey: `${prefix.replace(/\/+$/, "")}/${crypto.randomUUID()}.${req.ext.toLowerCase()}`,
         uploadId: "",
         ext: req.ext.toLowerCase(),
-        size,
+        size: req.blob.size,
         parts: [],
         phase: "staged",
         sourcePath: req.sourcePath,
@@ -183,8 +178,41 @@ export class UploadManager {
         updatedAt: Date.now(),
       };
       this.settings.pendingUploads[tempId] = pending;
+      mustPersistCreation = true;
+    }
+
+    const active = this.activeUploads.get(pending.tempId);
+    if (active) return active;
+    const runner = this.runUpload(req, pending, mustPersistCreation).finally(() => {
+      if (this.activeUploads.get(pending.tempId) === runner) {
+        this.activeUploads.delete(pending.tempId);
+      }
+    });
+    this.activeUploads.set(pending.tempId, runner);
+    return runner;
+  }
+
+  private async runUpload(
+    req: UploadRequest,
+    pending: PendingUpload,
+    mustPersistCreation: boolean,
+  ): Promise<UploadResult> {
+    const beforeSend = req.automatic
+      ? () => this.assertAutomaticUploadEnabled(req)
+      : undefined;
+    const size = req.blob.size;
+    const totalParts = Math.max(1, Math.ceil(size / PART_SIZE));
+    if (totalParts > MAX_PARTS) {
+      throw new Error(`附件过大：固定 4 MB 分片最多支持 ${MAX_PARTS} 片`);
+    }
+
+    if (mustPersistCreation) {
       // No network request is allowed until the staged task is durable.
       await this.persistState();
+    } else {
+      if (!pending.storageIdentity && req.automatic) this.assertAutomaticUploadEnabled(req);
+      await this.ensureTaskStorageIdentity(pending, beforeSend);
+      this.assertResumeSource(pending, req);
     }
 
     const phase = phaseOf(pending);
@@ -343,7 +371,11 @@ export class UploadManager {
     pending.sourceMtime = sourceMtime;
     if (clearStaging) pending.stagingPath = undefined;
     pending.updatedAt = Date.now();
-    await this.persistState();
+    // Retry once so the journal stays aligned with the md reference. The md
+    // has already been rewritten by the caller; a persist failure without
+    // retry would leave the journal pointing at a stale staging path on
+    // reload, stranding the task.
+    await persistOrRetry(() => this.persistState());
   }
 
   async markReferenceCommitting(tempId: string): Promise<void> {
@@ -451,9 +483,17 @@ export class UploadManager {
   }
 
   private assertResumeSource(pending: PendingUpload, req: UploadRequest): void {
-    const mtimeChanged = pending.sourceMtime !== undefined && req.sourceMtime !== undefined &&
-      pending.sourceMtime !== req.sourceMtime;
-    if (pending.size !== req.blob.size || pending.ext !== req.ext.toLowerCase() || mtimeChanged) {
+    // Both sides must carry a source mtime for the comparison to be trustworthy.
+    // A missing mtime on either side means we cannot prove the staged bytes
+    // still match the local file, so refuse to resume instead of risking a
+    // silently corrupted multipart assembly.
+    if (
+      pending.size !== req.blob.size ||
+      pending.ext !== req.ext.toLowerCase() ||
+      pending.sourceMtime === undefined ||
+      req.sourceMtime === undefined ||
+      pending.sourceMtime !== req.sourceMtime
+    ) {
       throw new UploadSourceChangedError(pending.tempId);
     }
   }
