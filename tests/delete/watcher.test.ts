@@ -7,6 +7,7 @@ import {
   deleteRemoteObject,
 } from "../../src/delete/watcher";
 import { OssError } from "../../src/oss/client";
+import { setOssReferenceHost } from "../../src/reference/codec";
 
 function makeHarness(content = "") {
   let fileMenu: ((menu: any, file: TFile) => void) | undefined;
@@ -74,6 +75,16 @@ test("extracts unique real OSS keys and ignores uploading placeholders", () => {
     "![](oss://vault/a.png)",
     "![](oss:///vault/%E6%8A%A5%E5%91%8A.pdf)",
     "![](oss://uploading/temp)",
+  ].join("\n")), ["vault/a.png", "vault/报告.pdf"]);
+});
+
+test("collects keys from both legacy oss:// and public URL references", () => {
+  setOssReferenceHost("bucket-a.oss-cn-hangzhou.aliyuncs.com");
+  assert.deepEqual(collectDocumentOssKeys([
+    "![](oss://vault/a.png)",
+    "![](https://bucket-a.oss-cn-hangzhou.aliyuncs.com/vault/a.png)",
+    "![](https://bucket-a.oss-cn-hangzhou.aliyuncs.com/vault/%E6%8A%A5%E5%91%8A.pdf)",
+    "![](https://other.example.com/vault/foreign.png)",
   ].join("\n")), ["vault/a.png", "vault/报告.pdf"]);
 });
 

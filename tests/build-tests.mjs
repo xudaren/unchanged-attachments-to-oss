@@ -10,6 +10,7 @@ await esbuild.build({
     "tests/credentials.test.ts",
     "tests/persistence.test.ts",
     "tests/reference/codec.test.ts",
+    "tests/reference/convert.test.ts",
     "tests/oss/errors.test.ts",
     "tests/oss/client.test.ts",
     "tests/oss/signer.test.ts",

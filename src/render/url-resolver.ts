@@ -1,3 +1,4 @@
+import { encodeObjectKey } from "../reference/codec";
 import { signedGetUrl } from "../oss/signer";
 import { SignedUrlCache } from "./url-cache";
 
@@ -8,6 +9,7 @@ export interface SignedUrlContext {
   accessKeyId: string;
   accessKeySecret: string;
   expireSeconds: number;
+  publicRead: boolean;
 }
 
 type SignResult = { url: string; expireAt: number };
@@ -87,12 +89,24 @@ export class SignedUrlResolver {
   resolveLease(key: string): Promise<SignedUrlLease> {
     if (this.disposed) return Promise.reject(new SignedUrlResolverDisposedError());
     const context = this.getContext();
-    if (!context.bucket || !context.host || !context.region || !context.accessKeyId || !context.accessKeySecret) {
+    if (!context.bucket || !context.host) {
+      return Promise.reject(new Error("OSS 未配置：请填写 Bucket / AK / SK"));
+    }
+    // Public-read rendering never signs: the durable public URL is valid
+    // forever, needs no AK/SK and stays usable while credentials are locked.
+    if (!context.publicRead && (!context.region || !context.accessKeyId || !context.accessKeySecret)) {
       return Promise.reject(new Error("OSS 未配置：请填写 Bucket / AK / SK"));
     }
     const identity = cacheIdentity(context, key);
     const cached = this.cache.getEntry(identity);
     if (cached) return Promise.resolve({ ...cached, generation: this.generation });
+
+    if (context.publicRead) {
+      const url = `https://${context.host}/${encodeObjectKey(key)}`;
+      const expireAt = Number.POSITIVE_INFINITY;
+      this.cache.set(identity, url, expireAt);
+      return Promise.resolve({ url, expireAt, generation: this.generation });
+    }
 
     const active = this.pending.get(identity);
     if (active) return active;
@@ -144,5 +158,5 @@ export class SignedUrlResolver {
 }
 
 function cacheIdentity(context: SignedUrlContext, key: string): string {
-  return JSON.stringify([context.bucket, context.host, key]);
+  return JSON.stringify([context.bucket, context.host, key, context.publicRead]);
 }

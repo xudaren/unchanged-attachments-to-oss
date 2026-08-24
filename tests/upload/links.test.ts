@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TFile, TFolder } from "obsidian";
+import { setOssReferenceHost } from "../../src/reference/codec";
 import {
   findResolvedAttachmentOccurrences,
   resolvedSourcePathsForAttachment,
@@ -9,6 +10,10 @@ import {
   scanMigrationOccurrences,
   waitForStableAttachmentOccurrences,
 } from "../../src/upload/links";
+
+// New uploads commit the unsigned public URL once the storage host is installed.
+const HOST = "bucket-a.oss-cn-hangzhou.aliyuncs.com";
+setOssReferenceHost(HOST);
 
 test("fallback occurrence discovery reads only MetadataCache candidates", async () => {
   const target = new TFile("assets/image.png", "image.png");
@@ -258,7 +263,7 @@ test("plans and replaces duplicate embeds as independent occurrences", async () 
   assert.equal(await replaceOneResolvedAttachmentReference(
     vault as never, metadataCache as never, target as never, note.path, "vault/two.png",
   ), true);
-  assert.equal(contents.get(note.path), "![image.png](oss:///vault/one.png) and ![image.png](oss:///vault/two.png)");
+  assert.equal(contents.get(note.path), `![image.png](https://${HOST}/vault/one.png) and ![image.png](https://${HOST}/vault/two.png)`);
 });
 
 test("commits the planned duplicate occurrence after surrounding text shifts", async () => {
@@ -294,7 +299,7 @@ test("commits the planned duplicate occurrence after surrounding text shifts", a
   ), true);
   assert.equal(
     contents.get(note.path),
-    "prefix ![[assets/image.png]] and ![image.png](oss:///vault/second.png)",
+    `prefix ![[assets/image.png]] and ![image.png](https://${HOST}/vault/second.png)`,
   );
 });
 
@@ -330,7 +335,7 @@ test("replaces only the same-basename attachment resolved by Obsidian", async ()
   );
 
   assert.equal(result, true);
-  assert.match(contents.get(noteA.path) ?? "", /oss:\/\/\/vault\/new\.png/);
+  assert.match(contents.get(noteA.path) ?? "", new RegExp(`https://${HOST.replace(/\./g, "\\.")}/vault/new\\.png`));
   assert.equal(contents.get(noteB.path), "![[assets/b/image.png]]");
 });
 
@@ -354,7 +359,7 @@ test("replaces markdown embeds whose destination contains balanced parentheses",
     vault as never, metadataCache as never, target as never, note.path, "vault/new.pdf",
   );
   assert.equal(result, true);
-  assert.equal(contents.get(note.path), "![报告](oss:///vault/new.pdf)");
+  assert.equal(contents.get(note.path), `![报告](https://${HOST}/vault/new.pdf)`);
 });
 
 test("distinguishes parentheses in a destination from a parenthesized Markdown title", async () => {

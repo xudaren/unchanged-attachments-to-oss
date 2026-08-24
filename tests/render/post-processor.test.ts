@@ -3,11 +3,16 @@ import test from "node:test";
 import { createOssPostProcessor } from "../../src/render/post-processor";
 import type { SignedUrlResolver } from "../../src/render/url-resolver";
 import type { PluginSettings } from "../../src/types";
+import { setOssReferenceHost } from "../../src/reference/codec";
+
+const HOST = "bucket-a.oss-cn-hangzhou.aliyuncs.com";
+setOssReferenceHost(HOST);
 
 function image(source: string) {
   const attributes = new Map<string, string>([["src", source]]);
   let errorMarker: { className?: string; textContent?: string | null; remove(): void } | null = null;
   const element = {
+    nodeType: 1,
     tagName: "IMG",
     dataset: {} as Record<string, string>,
     ownerDocument: {
@@ -159,4 +164,29 @@ test("Reading View replaces a PDF placeholder with the shared browser link", asy
 
   assert.equal(pdf.replacement, host);
   assert.equal(displayName, "百鸟数据-声纹检测报告.pdf");
+});
+
+test("Reading View hydrates public URL references but leaves foreign https media alone", async () => {
+  const publicImage = image(`https://${HOST}/vault/public.jpg`);
+  const foreign = image("https://external.example.com/vault/a.jpg");
+  const root = {
+    closest: () => null,
+    querySelectorAll: (selector: string) => selector.includes('src^="https://') ? [publicImage, foreign] : [],
+  } as unknown as HTMLElement;
+  const settings = {
+    bucketName: "bucket",
+    accessKeyId: "ak",
+    accessKeySecret: "sk",
+  } as PluginSettings;
+
+  await createOssPostProcessor(settings, {
+    resolve: async (key: string) => {
+      if (key !== "vault/public.jpg") throw new Error("must not sign foreign media");
+      return `https://signed.example/${key}`;
+    },
+  } as unknown as SignedUrlResolver)(root, {} as never);
+
+  assert.equal(publicImage.src, "https://signed.example/vault/public.jpg");
+  assert.equal(foreign.src, "https://external.example.com/vault/a.jpg");
+  assert.equal(foreign.errorText, "");
 });

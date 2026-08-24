@@ -1,11 +1,14 @@
 import { FuzzySuggestModal, Notice, Plugin, TFolder } from "obsidian";
 import {
+  accessHostFor,
   establishedStorageIdentityKey,
   NormalizedOssConfig,
+  normalizeCustomDomain,
   normalizeOssConfig,
   normalizeObjectKeyPrefix,
   normalizeSignedUrlExpiry,
   normalizeStorageIdentity,
+  recognitionAccessHosts,
   resolveLoadedObjectKeyPrefix,
   storageIdentityKey,
 } from "./config";
@@ -34,6 +37,8 @@ import { migrateAttachments } from "./upload/migrate";
 import { UploadProgressBar } from "./upload/progress";
 import { LocalInsuranceCopiesModal } from "./upload/local-copies";
 import { OssAttachmentContextMenu } from "./render/context-menu";
+import { getOssReferenceHost, setOssReferenceHost, setOssReferenceHosts } from "./reference/codec";
+import { normalizeVaultReferencesToAccessHost } from "./reference/convert";
 import { disconnectMediaLoading } from "./render/media-loading";
 import { runObjectAudit } from "./audit/modal";
 import { LifecycleQuiescedError, PluginLifecycle } from "./lifecycle";
@@ -92,6 +97,23 @@ export default class OssPlugin extends Plugin {
     this.urlCache = new SignedUrlCache();
     this.urlResolver = new SignedUrlResolver(
       () => {
+        // Public-read rendering needs only the immutable storage identity: no
+        // AK/SK, so media stays visible while credentials remain locked.
+        if (this.settings.publicRead) {
+          const identity = normalizeStorageIdentity({
+            ...this.settings,
+            objectKeyPrefix: "obsidian",
+          });
+          return {
+            bucket: identity.bucketName,
+            host: this.accessHost(identity.bucketName, identity.endpoint),
+            region: identity.region,
+            accessKeyId: "",
+            accessKeySecret: "",
+            expireSeconds: Number(this.settings.signedUrlExpireSeconds),
+            publicRead: true,
+          };
+        }
         // Rendering remains available for legacy Object Key prefixes, but every
         // connection/signing field must still validate before an HTTPS URL can
         // replace the durable oss:// source.
@@ -101,11 +123,12 @@ export default class OssPlugin extends Plugin {
         });
         return {
           bucket: config.bucketName,
-          host: `${config.bucketName}.${config.endpoint}`,
+          host: this.accessHost(config.bucketName, config.endpoint),
           region: config.region,
           accessKeyId: config.accessKeyId,
           accessKeySecret: config.accessKeySecret,
           expireSeconds: config.signedUrlExpireSeconds,
+          publicRead: false,
         };
       },
       this.urlCache,
@@ -317,6 +340,41 @@ export default class OssPlugin extends Plugin {
         if (this.requireConfigured()) this.pickFolderAndMigrate();
       },
     });
+
+    this.addCommand({
+      id: "convert-oss-references-to-public-urls",
+      name: "将所有引用归一到当前访问域名",
+      callback: () => void this.normalizeReferencesToAccessHost(),
+    });
+  }
+
+  /** One-shot idempotent rewrite of legacy and retired-host references to the current access host. */
+  private async normalizeReferencesToAccessHost(): Promise<void> {
+    const host = getOssReferenceHost();
+    if (!host) {
+      new Notice("存储身份未就绪：请先完成 Bucket 配置");
+      return;
+    }
+    try {
+      await this.lifecycle.run(async () => {
+        const notice = new Notice("正在归一 OSS 引用…", 0);
+        try {
+          const result = await normalizeVaultReferencesToAccessHost(
+            this.app.vault,
+            host,
+            { shouldContinue: () => this.lifecycle.isActive },
+          );
+          const failures = result.failedPaths.length > 0
+            ? `，${result.failedPaths.length} 个文件读取失败未处理`
+            : "";
+          notice.setMessage(`已归一 ${result.converted} 个文档（共扫描 ${result.scanned} 个）${failures}`);
+        } finally {
+          window.setTimeout(() => notice.hide(), 8000);
+        }
+      });
+    } catch (error) {
+      if (!(error instanceof LifecycleQuiescedError)) console.warn("[oss] 引用归一失败", error);
+    }
   }
 
   onunload(): void {
@@ -407,7 +465,10 @@ export default class OssPlugin extends Plugin {
     }
     // 兼容缺失字段
     if (!this.settings.pendingUploads) this.settings.pendingUploads = {};
+    if (!Array.isArray(this.settings.retiredAccessDomains)) this.settings.retiredAccessDomains = [];
     if (this.settings.autoUpload === undefined) this.settings.autoUpload = true;
+    if (this.settings.publicRead === undefined) this.settings.publicRead = false;
+    this.installReferenceHost();
     if (migrated) await this.saveSettings();
   }
 
@@ -449,6 +510,70 @@ export default class OssPlugin extends Plugin {
     // memory rollback keeps disk aligned with the in-memory key, so a later
     // reload can still decrypt persisted state.
     await persistOrRetry(() => this.saveSettings());
+  }
+
+  /** Toggle public-read rendering: pure render decision, no credential or client change. */
+  async applyPublicReadChange(enabled: boolean): Promise<void> {
+    this.lifecycle.assertActive("切换公共读渲染");
+    const previous = this.settings.publicRead;
+    this.settings.publicRead = enabled;
+    this.urlResolver.clear();
+    clearHmacKeyCache();
+    try {
+      await persistOrRetry(() => this.saveSettings());
+    } catch (error) {
+      // Roll the in-memory toggle back so the settings UI reset reflects the
+      // real state, and bump the generation again so no resolver keeps the
+      // unpersisted mode.
+      this.settings.publicRead = previous;
+      this.urlResolver.clear();
+      throw error;
+    }
+    void resetOssRenderLifetime(
+      this.renderLifetime,
+      this.urlResolver,
+      undefined,
+      this.attachmentContextMenu,
+    ).catch((error) => console.warn("[oss-render] 公共读切换后刷新附件失败", error));
+  }
+
+  /** Switch the browser access host: pure access decision, no credential or client change. */
+  async applyCustomDomainChange(domain: string): Promise<void> {
+    this.lifecycle.assertActive("切换访问域名");
+    const normalized = normalizeCustomDomain(domain);
+    const previous = this.settings.customDomain;
+    if (normalized === previous) return;
+    const previousRetired = this.settings.retiredAccessDomains;
+    this.settings.customDomain = normalized;
+    // The outgoing domain stays recognizable so the normalize command can
+    // still migrate its references; rendering prefers the new access host.
+    if (previous && !previousRetired.includes(previous)) {
+      this.settings.retiredAccessDomains = [...previousRetired, previous];
+    }
+    // Invalidate signing synchronously before the first persistence await.
+    this.urlResolver.clear();
+    clearHmacKeyCache();
+    try {
+      await persistOrRetry(() => this.saveSettings());
+    } catch (error) {
+      // Roll back so the settings input reflects the real state, then restore
+      // the previous recognition hosts.
+      this.settings.customDomain = previous;
+      this.settings.retiredAccessDomains = previousRetired;
+      this.urlResolver.clear();
+      this.installReferenceHost();
+      throw error;
+    }
+    this.installReferenceHost();
+    void resetOssRenderLifetime(
+      this.renderLifetime,
+      this.urlResolver,
+      undefined,
+      this.attachmentContextMenu,
+    ).catch((error) => console.warn("[oss-render] 访问域名切换后刷新附件失败", error));
+    if (normalized) {
+      new Notice("访问域名已切换：如需迁移存量引用，请运行命令「将所有引用归一到当前访问域名」");
+    }
   }
 
   hasEncryptedCredentials(): boolean {
@@ -575,6 +700,7 @@ export default class OssPlugin extends Plugin {
     this.urlResolver.clear();
     clearHmacKeyCache();
     Object.assign(this.settings, config);
+    this.installReferenceHost();
     this.client = this.createRuntimeClient(this.settings);
     this.uploadManager.setClient(this.client);
     this.deleteWatcher.setClient(this.client);
@@ -584,6 +710,36 @@ export default class OssPlugin extends Plugin {
       undefined,
       this.attachmentContextMenu,
     ).catch((error) => console.warn("[oss-render] 配置切换后刷新附件失败", error));
+  }
+
+  /**
+   * Publish the access host (custom domain, else the default host) for
+   * formatting, and keep the permanent default host plus every retired access
+   * host recognizable so existing references survive an access-host change.
+   */
+  private installReferenceHost(): void {
+    const { bucketName, endpoint } = this.settings;
+    const defaultHost = bucketName && endpoint ? `${bucketName}.${endpoint}` : "";
+    const accessHost = this.accessHost(bucketName, endpoint);
+    const recognized = recognitionAccessHosts(
+      accessHost,
+      defaultHost,
+      this.settings.retiredAccessDomains ?? [],
+    );
+    try {
+      setOssReferenceHosts(accessHost, recognized);
+    } catch {
+      setOssReferenceHost("");
+    }
+  }
+
+  /** Browser-facing access host; an invalid stored domain falls back to the default host. */
+  private accessHost(bucketName: string, endpoint: string): string {
+    try {
+      return accessHostFor(bucketName, endpoint, this.settings.customDomain);
+    } catch {
+      return bucketName && endpoint ? `${bucketName}.${endpoint}` : "";
+    }
   }
 
   private clearRuntimeCredentials(): void {

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { TFile } from "obsidian";
 import { OssAttachmentContextMenu, removeOssReference } from "../../src/render/context-menu";
+import { setOssReferenceHost } from "../../src/reference/codec";
 
 test("removes exactly one matching OSS attachment reference", () => {
   const source = [
@@ -31,6 +32,22 @@ test("matches Electron-encoded unicode OSS keys without touching siblings", () =
 test("leaves markdown unchanged when the requested OSS key is absent", () => {
   const source = "![](oss://vault/a.pdf)";
   assert.deepEqual(removeOssReference(source, "vault/missing.pdf"), { content: source, removed: false });
+});
+
+test("removes a public URL reference without touching legacy siblings", () => {
+  setOssReferenceHost("bucket-a.oss-cn-hangzhou.aliyuncs.com");
+  const source = [
+    "before",
+    "![video](https://bucket-a.oss-cn-hangzhou.aliyuncs.com/vault/video.mp4)",
+    "![legacy](oss://vault/legacy.mp4)",
+    "after",
+  ].join("\n");
+
+  const result = removeOssReference(source, "vault/video.mp4");
+
+  assert.equal(result.removed, true);
+  assert.doesNotMatch(result.content, /video\.mp4/);
+  assert.match(result.content, /oss:\/\/vault\/legacy\.mp4/);
 });
 
 test("refuses removal when the source document contains duplicate keys", async () => {

@@ -73,6 +73,44 @@ export function normalizeOssEndpoint(value: string, region: string): string {
   return endpoint;
 }
 
+/**
+ * Custom access domain: hostname-format validation only. Network probing is
+ * forbidden because private buckets cannot be probed anonymously and any probe
+ * would misjudge; binding the CNAME and ICP filing is the user's guarantee.
+ */
+export function normalizeCustomDomain(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return "";
+  if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(normalized)) {
+    throw new Error("自定义域名无效：需为合法 hostname（如 cdn.example.com）");
+  }
+  return normalized;
+}
+
+/** Browser-facing access host: the custom domain when set, else the default host. */
+export function accessHostFor(bucketName: string, endpoint: string, customDomain: string): string {
+  const custom = normalizeCustomDomain(customDomain);
+  if (custom) return custom;
+  return bucketName && endpoint ? `${bucketName}.${endpoint}` : "";
+}
+
+/**
+ * Full recognition host set: the current access host, the permanent default
+ * host and every retired access host. Retired hosts stay recognizable so the
+ * normalize command can still migrate their references after a domain switch.
+ */
+export function recognitionAccessHosts(
+  accessHost: string,
+  defaultHost: string,
+  retired: readonly string[],
+): string[] {
+  const hosts = new Set<string>();
+  for (const host of [accessHost, defaultHost, ...retired]) {
+    if (host) hosts.add(host);
+  }
+  return [...hosts];
+}
+
 export function normalizeObjectKeyPrefix(value: string): string {
   // Spaces are real Object Key bytes. Never trim them: doing so would silently
   // move an existing Vault to another storage namespace during an AK rotation.

@@ -9,8 +9,13 @@ import {
   isInternalStagingPath,
 } from "../../src/upload/interceptor";
 import { MarkdownView, TFile, TFolder } from "obsidian";
+import { setOssReferenceHost } from "../../src/reference/codec";
 import { DEFAULT_SETTINGS, PendingUpload } from "../../src/types";
 import { LifecycleQuiescedError, PluginLifecycle } from "../../src/lifecycle";
+
+// New uploads commit the unsigned public URL once the storage host is installed.
+const HOST = "bucket-a.oss-cn-hangzhou.aliyuncs.com";
+setOssReferenceHost(HOST);
 
 test("captures an input File into a stable Blob before asynchronous upload", async () => {
   let reads = 0;
@@ -532,7 +537,7 @@ test("cold-start retry uses the persisted local attachment locator after placeho
 
   assert.equal(result.failed.length, 0);
   assert.equal(deleted, true);
-  assert.equal(markdown, "![image.png](oss:///vault/a.png)");
+  assert.equal(markdown, `![image.png](https://${HOST}/vault/a.png)`);
 });
 
 async function runDurabilityFailure(

@@ -35,6 +35,21 @@ test("persistence preserves a legacy plaintext file until encrypted migration su
   assert.equal(snapshot.accessKeySecret, "legacy-secret");
 });
 
+test("public read toggle defaults off and persists as a non-sensitive setting", () => {
+  assert.equal(DEFAULT_SETTINGS.publicRead, false);
+  const snapshot = createPersistedSettingsSnapshot({ ...DEFAULT_SETTINGS, publicRead: true }, false);
+  assert.equal(snapshot.publicRead, true);
+});
+
+test("retired access domains persist so references survive a restart", () => {
+  assert.deepEqual(DEFAULT_SETTINGS.retiredAccessDomains, []);
+  const snapshot = createPersistedSettingsSnapshot(
+    { ...DEFAULT_SETTINGS, retiredAccessDomains: ["old-cdn.example.com"] },
+    false,
+  );
+  assert.deepEqual(snapshot.retiredAccessDomains, ["old-cdn.example.com"]);
+});
+
 test("persistOrRetry returns on the first successful save", async () => {
   let calls = 0;
   await persistOrRetry(async () => { calls++; });

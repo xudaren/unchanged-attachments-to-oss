@@ -1,16 +1,43 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  accessHostFor,
   defaultObjectKeyPrefix,
   resolveLoadedObjectKeyPrefix,
   establishedStorageIdentityKey,
   normalizeBucketName,
+  normalizeCustomDomain,
   normalizeObjectKeyPrefix,
   normalizeOssConfig,
   normalizeOssEndpoint,
   normalizeSignedUrlExpiry,
+  recognitionAccessHosts,
   storageIdentityKey,
 } from "../src/config";
+
+test("custom access domain validates hostname format and resolves the access host", () => {
+  assert.equal(normalizeCustomDomain(""), "");
+  assert.equal(normalizeCustomDomain(" CDN.Example.COM "), "cdn.example.com");
+  assert.throws(() => normalizeCustomDomain("https://cdn.example.com"), /hostname/);
+  assert.throws(() => normalizeCustomDomain("cdn"), /hostname/);
+  // The access host prefers the custom domain and falls back to the default host.
+  const endpoint = "oss-cn-hangzhou.aliyuncs.com";
+  assert.equal(accessHostFor("my-bucket", endpoint, "cdn.example.com"), "cdn.example.com");
+  assert.equal(accessHostFor("my-bucket", endpoint, ""), `my-bucket.${endpoint}`);
+  assert.equal(accessHostFor("", endpoint, ""), "");
+});
+
+test("recognition set keeps the default host and every retired access host", () => {
+  const endpoint = "oss-cn-hangzhou.aliyuncs.com";
+  const defaultHost = `my-bucket.${endpoint}`;
+  // Retired custom domains stay recognizable so normalization can migrate them.
+  assert.deepEqual(
+    recognitionAccessHosts("new-cdn.example.com", defaultHost, ["old-cdn.example.com", defaultHost]),
+    ["new-cdn.example.com", defaultHost, "old-cdn.example.com"],
+  );
+  // Empty drafts contribute nothing.
+  assert.deepEqual(recognitionAccessHosts("", "", []), []);
+});
 
 test("normalizes a legacy Region and resolves the standard Endpoint", () => {
   const config = normalizeOssConfig({

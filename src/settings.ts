@@ -122,6 +122,51 @@ export class OssSettingTab extends PluginSettingTab {
         }),
       );
 
+    new Setting(containerEl)
+      .setName("公共读渲染")
+      .setDesc("Bucket 已开启公共读时使用：渲染与新上传引用直接用未签名公共 URL，凭证锁定也能显示；关闭则恢复动态签名渲染。存量 oss:// 引用可用命令面板「将所有引用归一到当前访问域名」一次性转换")
+      .addToggle((t) =>
+        t.setValue(plugin.settings.publicRead).onChange(async (v) => {
+          await this.runWhileActive(async () => {
+            try {
+              await plugin.applyPublicReadChange(v);
+              new Notice(v ? "公共读渲染已开启" : "已恢复签名渲染");
+            } catch (error) {
+              t.setValue(plugin.settings.publicRead);
+              new Notice(`公共读切换失败：${(error as Error).message}`);
+            }
+          });
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("自定义访问域名")
+      .setDesc("可选。绑定到 Bucket 的 CNAME 域名，用于规避阿里云默认域名的浏览器强制下载策略；配置后签名 URL、公共 URL 与新上传引用统一使用该域名，需自行完成域名绑定与 ICP 备案。变更域名后旧域名转为退役访问域名，存量引用仍可渲染与管理，但请运行命令「将所有引用归一到当前访问域名」完成迁移")
+      .addText((t) => {
+        t.setPlaceholder("留空使用默认 {bucket}.{endpoint}")
+          .setValue(plugin.settings.customDomain);
+        // Commit on blur/Enter only: keystroke-by-keystroke saves would reject
+        // incomplete hostnames and thrash the render lifetime.
+        const commit = () => {
+          void this.runWhileActive(async () => {
+            try {
+              await plugin.applyCustomDomainChange(t.getValue());
+              t.setValue(plugin.settings.customDomain);
+            } catch (error) {
+              t.setValue(plugin.settings.customDomain);
+              new Notice(`访问域名保存失败：${(error as Error).message}`);
+            }
+          });
+        };
+        t.inputEl.addEventListener("blur", commit);
+        t.inputEl.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commit();
+          }
+        });
+      });
+
     // ─── 凭证区域（缓冲，不即时保存） ──────────────────────────────────────
 
     new Setting(containerEl).setName("OSS 凭证").setHeading();

@@ -9,6 +9,7 @@ import {
   selectFinalDeletionCandidates,
 } from "../../src/audit/reconcile";
 import type { PendingUpload } from "../../src/types";
+import { setOssReferenceHost } from "../../src/reference/codec";
 
 test("extracts unique decoded object keys from repeated references", () => {
   const keys = extractReferenceKeys([
@@ -30,6 +31,18 @@ test("ignores uploading placeholders and Markdown examples inside code", () => {
   ].join("\n");
 
   assert.deepEqual([...extractReferenceKeys(content)], ["vault/real.png"]);
+});
+
+test("extracts keys from both legacy oss:// and public URL references", () => {
+  setOssReferenceHost("bucket-a.oss-cn-hangzhou.aliyuncs.com");
+  const content = [
+    "![](oss://vault/legacy.png)",
+    "![](https://bucket-a.oss-cn-hangzhou.aliyuncs.com/vault/public.png)",
+    "![](https://bucket-a.oss-cn-hangzhou.aliyuncs.com/vault/public.png)",
+    "![](https://other.example.com/vault/foreign.png)",
+  ].join("\n");
+
+  assert.deepEqual([...extractReferenceKeys(content)], ["vault/legacy.png", "vault/public.png"]);
 });
 
 test("filters extracted references to selected object keys", () => {

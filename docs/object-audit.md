@@ -12,7 +12,7 @@
 
 ## 流程
 
-用户主动执行“核验 OSS 对象引用”命令时，插件完整分页调用 ListObjectsV2 获取 `objectKeyPrefix` 下的对象集合，并扫描 Vault 内 Markdown、Canvas 与 Base 的 `oss://` 引用集合。`OSS - Vault引用 - pendingUploads` 为疑似垃圾，`Vault引用 - OSS` 为引用失效；禁止只比较数量。
+用户主动执行“核验 OSS 对象引用”命令时，插件完整分页调用 ListObjectsV2 获取 `objectKeyPrefix` 下的对象集合，并经 `OssReferenceCodec` 扫描 Vault 内 Markdown、Canvas 与 Base 中公共 URL 形态与遗留 `oss://` 形态的引用集合。`OSS - Vault引用 - pendingUploads` 为疑似垃圾，`Vault引用 - OSS` 为引用失效；禁止只比较数量。
 
 核验是唯一允许读取全 Vault 结构化内容的路径。扫描必须使用有界并发，每个文件读取后立即提取 Object Key 并释放文本，禁止同时读取并持有全部文件内容。任一文件读取失败时本次核验不得生成可删除结论；删除前二次扫描可只提取已选 Object Key，但仍必须检查全部结构化文件。
 

@@ -10,10 +10,16 @@ export interface PluginSettings {
   encryptedCredentials?: EncryptedCredentials;
   /** 可选：自定义 endpoint（不填则由 region 拼出 oss-{region}.aliyuncs.com） */
   endpoint: string;
+  /** 可选：自定义访问域名（绑定 Bucket 的 CNAME），统一用于签名 URL、公共 URL 与新上传引用的 host */
+  customDomain: string;
+  /** 曾使用过的退役访问域名：保留识别能力，直到引用归一命令完成迁移 */
+  retiredAccessDomains: string[];
   /** 存储路径前缀，默认 vault 名 */
   objectKeyPrefix: string;
   /** 签名 URL 过期秒数 */
   signedUrlExpireSeconds: number;
+  /** Bucket 级公共读开关：纯渲染决策，不参与存储身份 */
+  publicRead: boolean;
   /** 自动上传开关，关闭后暂停拦截与补传 */
   autoUpload: boolean;
   /** 未完成 MultipartUpload：{tempId → 状态} */
@@ -90,8 +96,11 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   accessKeyId: "",
   accessKeySecret: "",
   endpoint: "",
+  customDomain: "",
+  retiredAccessDomains: [],
   objectKeyPrefix: "",
   signedUrlExpireSeconds: 3600,
+  publicRead: false,
   autoUpload: true,
   pendingUploads: {},
 };

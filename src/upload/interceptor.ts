@@ -7,7 +7,7 @@ import {
   Vault,
 } from "obsidian";
 import { normalizeError } from "../error";
-import { formatOssReference } from "../reference/codec";
+import { assertOssReferenceHostInstalled, formatOssReference } from "../reference/codec";
 import { LifecycleGate, LifecycleQuiescedError } from "../lifecycle";
 import { PendingReferenceLocator, PendingUpload, PluginSettings, isSupportedExt } from "../types";
 import { RetryBatchResult, RetryEntry, RetryIndicator } from "./indicator";
@@ -296,6 +296,8 @@ export class AttachmentInterceptor {
       uploadedObjectKey = uploaded.objectKey;
       this.lifecycle?.assertActive("修改附件引用");
       await this.manager.markReferenceCommitting(tempId);
+      // 新引用必须是公共 URL：host 未就绪时直接失败，禁止回退写 oss://。
+      assertOssReferenceHostInstalled();
       const finalReference = formatOssReference(uploaded.objectKey, input.name);
       this.lifecycle?.assertActive("修改附件引用");
       let committed = view.file?.path === input.sourcePath &&

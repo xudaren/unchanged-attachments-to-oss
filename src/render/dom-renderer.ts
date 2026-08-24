@@ -16,6 +16,7 @@ import {
   beginRenderState,
   cleanupRenderState,
   isCurrentRender,
+  markAppliedUrl,
   ownsCurrentSource,
   renderStateKey,
   setRenderCleanup,
@@ -38,6 +39,14 @@ const OSS_MEDIA_SELECTOR = [
   'a[href^="oss://"]',
   'embed[src^="oss://"]',
   '.internal-embed[src^="oss://"]',
+  // Public URL references carry a dynamic host, so the selector stays broad
+  // and hydration candidates are confirmed against the configured bucket host.
+  'img[src^="https://"]',
+  'video[src^="https://"]',
+  'audio[src^="https://"]',
+  'a[href^="https://"]',
+  'embed[src^="https://"]',
+  '.internal-embed[src^="https://"]',
 ].join(",");
 
 export type UrlResolver = LeaseUrlResolver;
@@ -102,7 +111,9 @@ export async function hydrateOssSubtree(
   if (lifetime && !lifetime.isActive) return;
   const elements: Element[] = [];
   if (isHydrationCandidate(root)) elements.push(root as unknown as Element);
-  elements.push(...findDescendants(root, OSS_MEDIA_SELECTOR));
+  for (const element of findDescendants(root, OSS_MEDIA_SELECTOR)) {
+    if (isHydrationCandidate(element)) elements.push(element);
+  }
   await Promise.allSettled(elements.map((element) =>
     hydrateElement(element, resolver, pdfRenderer, contextMenu, undefined, lifetime)
   ));
@@ -267,6 +278,20 @@ async function hydrateElement(
     clearOssRenderError(element);
     return;
   }
+  // The renderer's own DOM writes (applied URLs, mounted captions, media moved
+  // into Live Preview slots) echo back through the MutationObserver. Once this
+  // pipeline owns an element for a key, rerunning it tears down and remounts
+  // those artifacts forever, so lazy media never even gets its URL applied.
+  // Error-marked elements stay eligible so a retry can rerun the pipeline, and
+  // configuration resets clean the render state before hydrating again.
+  if (renderStateKey(html) === key && element.getAttribute("data-oss-render-error") !== "true") return;
+  // Artifacts mounted inside an already owned session (e.g. the open link of a
+  // rendered PDF card carries the signed/public URL itself) must not start a
+  // second session for the same key: the embed branch would replace the link
+  // with yet another card and nest cards forever.
+  for (let parent = html.parentElement; parent; parent = parent.parentElement) {
+    if (renderStateKey(parent) === key) return;
+  }
 
   const desired = mediaKind(key);
   beginRenderState(html, key, attribute);
@@ -310,6 +335,7 @@ async function hydrateElement(
       if (desired !== "embed") mountTrackedLabel(replacement, displayName, key);
     } else if (element.tagName === "A") {
       const anchor = element as HTMLAnchorElement;
+      markAppliedUrl(html, lease.url);
       anchor.href = lease.url;
       anchor.target = "_blank";
     } else if (desired) {
@@ -427,7 +453,10 @@ function mountTrackedLabel(media: HTMLElement, name: string, key: string, host?:
 }
 
 function isLivePreviewEmbedHost(element: Element): boolean {
-  return element.matches?.('.internal-embed[src^="oss://"]') === true;
+  if (element.matches?.('.internal-embed[src^="oss://"]')) return true;
+  if (element.matches?.(".internal-embed") !== true) return false;
+  const source = element.getAttribute("src");
+  return source !== null && ossKeyFromImageSource(source) !== null;
 }
 
 function mountInLivePreviewSlot(host: HTMLElement, media: HTMLElement): HTMLElement {
@@ -544,6 +573,7 @@ function isHydrationCandidate(node: ParentNode): boolean {
   if (candidate.nodeType !== 1 || (!MEDIA_TAGS.has(candidate.tagName) && !isLivePreviewEmbedHost(candidate))) return false;
   if (renderStateKey(candidate as HTMLElement)) return true;
   const attribute = candidate.tagName === "A" ? "href" : "src";
-  return candidate.getAttribute(attribute)?.startsWith("oss://") === true ||
+  const source = candidate.getAttribute(attribute);
+  return (source !== null && ossKeyFromImageSource(source) !== null) ||
     candidate.getAttribute("data-oss-render-error") === "true";
 }

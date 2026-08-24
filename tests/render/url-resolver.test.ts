@@ -3,7 +3,11 @@ import test from "node:test";
 import { SignedUrlCache } from "../../src/render/url-cache";
 import { SignedUrlResolver } from "../../src/render/url-resolver";
 
-function context(host: string) {
+function context(host: string, overrides: Partial<ReturnType<typeof baseContext>> = {}) {
+  return { ...baseContext(host), ...overrides };
+}
+
+function baseContext(host: string) {
   return {
     bucket: "bucket-a",
     host,
@@ -11,6 +15,7 @@ function context(host: string) {
     accessKeyId: "ak",
     accessKeySecret: "sk",
     expireSeconds: 3600,
+    publicRead: false,
   };
 }
 
@@ -105,6 +110,7 @@ test("rejects incomplete AK/SK configuration before invoking the signer", async 
       accessKeyId: "",
       accessKeySecret: "",
       expireSeconds: 3600,
+      publicRead: false,
     }),
     new SignedUrlCache(),
     async () => {
@@ -173,4 +179,58 @@ test("updating an existing LRU entry does not evict another cached URL", () => {
 
   assert.equal(cache.get("first"), "https://signed/first");
   assert.equal(cache.get("second"), "https://signed/second-new");
+});
+
+test("public read resolves the unsigned public URL without AK/SK and without signing", async () => {
+  let signCalls = 0;
+  const resolver = new SignedUrlResolver(
+    () => context("bucket-a.oss-cn-shanghai.aliyuncs.com", {
+      publicRead: true,
+      accessKeyId: "",
+      accessKeySecret: "",
+    }),
+    new SignedUrlCache(),
+    async () => {
+      signCalls += 1;
+      return { url: "https://signed/a.jpg", expireAt: Date.now() + 3_600_000 };
+    },
+  );
+
+  const lease = await resolver.resolveLease("vault/报告 a.jpg");
+  assert.equal(lease.url, "https://bucket-a.oss-cn-shanghai.aliyuncs.com/vault/%E6%8A%A5%E5%91%8A%20a.jpg");
+  assert.equal(lease.expireAt, Number.POSITIVE_INFINITY);
+  assert.equal(resolver.isLeaseCurrent(lease), true);
+  assert.equal(signCalls, 0);
+});
+
+test("public read cache entries are distinct from signed entries for the same key", async () => {
+  let publicRead = false;
+  let signCalls = 0;
+  const resolver = new SignedUrlResolver(
+    () => context("bucket-a.oss-cn-shanghai.aliyuncs.com", { publicRead }),
+    new SignedUrlCache(),
+    async () => {
+      signCalls += 1;
+      return { url: "https://signed/a.jpg", expireAt: Date.now() + 3_600_000 };
+    },
+  );
+
+  assert.equal(await resolver.resolve("vault/a.jpg"), "https://signed/a.jpg");
+  // Flip the toggle without clear(): the cache key must keep the two forms apart.
+  publicRead = true;
+  assert.equal(
+    await resolver.resolve("vault/a.jpg"),
+    "https://bucket-a.oss-cn-shanghai.aliyuncs.com/vault/a.jpg",
+  );
+  assert.equal(signCalls, 1);
+});
+
+test("public read still rejects an incomplete storage identity", async () => {
+  const resolver = new SignedUrlResolver(
+    () => context("", { publicRead: true, bucket: "" }),
+    new SignedUrlCache(),
+    async () => ({ url: "https://invalid", expireAt: Date.now() + 3_600_000 }),
+  );
+
+  await assert.rejects(resolver.resolve("vault/a.jpg"), /OSS 未配置/);
 });

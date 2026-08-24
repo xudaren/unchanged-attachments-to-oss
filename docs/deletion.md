@@ -14,7 +14,7 @@
 
 插件不维护 OSS 引用索引，也不监听 Markdown 修改或文件删除来推断用户意图。删除操作必须来自插件提供的显式入口：单个 OSS 附件使用附件右键菜单；整篇 Markdown 使用文件右键菜单“删除文档并处理 OSS 附件”。原生 Obsidian 删除、外部同步或系统文件操作只删除本地内容，不联动删除 OSS；遗留对象由用户主动执行“核验 OSS 对象引用”处理。
 
-“删除文档并处理 OSS 附件”必须在文档仍存在时读取内容、提取去重后的 `oss://` Object Key，并在同一弹窗中展示删除选择；远端对象默认不选中。用户确认后先调用 Obsidian `FileManager.trashFile` 将文档移入用户配置的回收位置，只有本地删除成功才处理用户选中的 OSS 对象。远端删除失败时报告逐项结果，已进入回收位置的文档允许用户恢复后重试，禁止 monkey patch `trashFile`、`vault.delete` 或 `vault.trash` 拦截原生行为。
+“删除文档并处理 OSS 附件”必须在文档仍存在时读取内容，经 `OssReferenceCodec` 从新格式公共 URL 与遗留 `oss://` 两种形态中提取去重后的 Object Key，并在同一弹窗中展示删除选择；远端对象默认不选中。用户确认后先调用 Obsidian `FileManager.trashFile` 将文档移入用户配置的回收位置，只有本地删除成功才处理用户选中的 OSS 对象。远端删除失败时报告逐项结果，已进入回收位置的文档允许用户恢复后重试，禁止 monkey patch `trashFile`、`vault.delete` 或 `vault.trash` 拦截原生行为。
 
 插件冷启动禁止自动执行全 Vault 内容扫描或 OSS 管理请求。孤儿 MultipartUpload 清理、OSS 对象核验和附件迁移均只允许用户通过命令或设置页手动触发；正常的当前文档渲染、附件自动上传和显式删除入口不受影响。
 

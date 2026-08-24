@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AttachmentContextMenuBinder } from "../../src/render/context-menu";
 import { RenderSessionLifetime } from "../../src/render/lifetime";
+import { setOssReferenceHost } from "../../src/reference/codec";
 import {
   disposeRemovedOssRenderSessions,
   disposeOssRenderSessions,
@@ -10,6 +11,9 @@ import {
   resetOssRenderSessions,
   selectMutationRoots,
 } from "../../src/render/dom-renderer";
+
+const HOST = "bucket-a.oss-cn-hangzhou.aliyuncs.com";
+setOssReferenceHost(HOST);
 
 interface DomElementInfoLike {
   cls?: string | string[];
@@ -251,6 +255,100 @@ test("hydrates only the supplied OSS image subtree", async () => {
   assert.equal(image.src, "https://signed.example/vault/a.jpg");
 });
 
+test("hydrates a public URL reference under the configured bucket host", async () => {
+  const image = mediaElement("IMG", `https://${HOST}/vault/a.jpg`);
+  const keys: string[] = [];
+
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async (key: string) => {
+      keys.push(key);
+      return "https://signed.example/vault/a.jpg";
+    },
+  });
+
+  assert.deepEqual(keys, ["vault/a.jpg"]);
+  assert.equal(image.src, "https://signed.example/vault/a.jpg");
+});
+
+test("leaves foreign https media to the host renderer", async () => {
+  const image = mediaElement("IMG", "https://external.example.com/vault/a.jpg");
+
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => { throw new Error("must not sign foreign media"); },
+  });
+
+  assert.equal(image.src, "https://external.example.com/vault/a.jpg");
+  assert.equal(image.errorText, "");
+  assert.equal(image.dataset.ossRenderKey, undefined);
+});
+
+test("does not re-sign when the applied signed URL echoes back through the observer", async () => {
+  const image = mediaElement("IMG", `https://${HOST}/vault/a.jpg`);
+  let signings = 0;
+  const resolver = {
+    resolve: async (key: string) => {
+      signings += 1;
+      return `https://${HOST}/${key}?x-oss-date=20260820&x-oss-signature=abc`;
+    },
+  };
+
+  await hydrateOssSubtree(image as unknown as ParentNode, resolver);
+  // The src attribute mutation produced by the renderer itself is delivered
+  // back through the MutationObserver; it must not restart the render pipeline.
+  await hydrateOssSubtree(image as unknown as ParentNode, resolver);
+
+  assert.equal(image.src, `https://${HOST}/vault/a.jpg?x-oss-date=20260820&x-oss-signature=abc`);
+  assert.equal(signings, 1);
+});
+
+test("does not re-hydrate when the applied public URL equals the canonical source", async () => {
+  const image = mediaElement("IMG", `https://${HOST}/vault/a.jpg`);
+  let resolutions = 0;
+  const resolver = {
+    resolve: async () => {
+      resolutions += 1;
+      return `https://${HOST}/vault/a.jpg`;
+    },
+  };
+
+  await hydrateOssSubtree(image as unknown as ParentNode, resolver);
+  await hydrateOssSubtree(image as unknown as ParentNode, resolver);
+
+  assert.equal(image.src, `https://${HOST}/vault/a.jpg`);
+  assert.equal(resolutions, 1);
+});
+
+test("does not rebind or remount when a pending media echoes through the observer", async () => {
+  // The media keeps its canonical source until lazy loading applies the lease
+  // URL, so every observer echo must not rerun the full pipeline: each pass
+  // would tear down and remount the caption, producing fresh mutations forever.
+  const image = mediaElement("IMG", `https://${HOST}/vault/slow.jpg`);
+  const completions = new Map<string, (url: string) => void>();
+  const resolver = {
+    resolve: (key: string) => new Promise<string>((resolve) => completions.set(key, resolve)),
+  };
+  let binds = 0;
+  const binder: AttachmentContextMenuBinder = {
+    bind: () => { binds += 1; },
+    unbind: () => undefined,
+  };
+
+  const first = hydrateOssSubtree(image as unknown as ParentNode, resolver, undefined, binder);
+  await Promise.resolve();
+  // Echoes must short-circuit before awaiting the still-pending lease again.
+  const echoes = Promise.allSettled([
+    hydrateOssSubtree(image as unknown as ParentNode, resolver, undefined, binder),
+    hydrateOssSubtree(image as unknown as ParentNode, resolver, undefined, binder),
+  ]);
+  await Promise.resolve();
+
+  assert.equal(binds, 1);
+  completions.get("vault/slow.jpg")?.("https://signed.example/vault/slow.jpg");
+  await first;
+  await echoes;
+  assert.equal(image.src, "https://signed.example/vault/slow.jpg");
+});
+
 test("replaces an Obsidian image placeholder with the actual media type", async () => {
   const image = mediaElement("IMG", "oss://vault/a.mp4") as ReturnType<typeof mediaElement> & {
     ownerDocument?: ReturnType<typeof documentDouble>;
@@ -376,6 +474,35 @@ test("replaces a PDF placeholder with the shared browser link", async () => {
   assert.deepEqual(mounts, ["https://signed.example/vault/a.pdf"]);
   assert.deepEqual(names, ["百鸟数据-声纹检测报告.pdf"]);
   assert.equal(image.replacement, pdfHost);
+});
+
+test("observer echo of a rendered PDF card does not nest another card", async () => {
+  // The card's own open link carries the signed/public URL, so an observer
+  // echo of the inserted subtree must not start a second session for the key.
+  const image = mediaElement("IMG", `oss://vault/a.pdf`) as ReturnType<typeof mediaElement> & {
+    replacement?: unknown;
+  };
+  const card = mediaElement("DIV", "");
+  const mounts: string[] = [];
+  const pdfRenderer = {
+    mount: (_from: Element, url: string) => {
+      mounts.push(url);
+      return card as unknown as HTMLElement;
+    },
+  };
+  const resolver = { resolve: async () => `https://${HOST}/vault/a.pdf` };
+
+  await hydrateOssSubtree(image as unknown as ParentNode, resolver, pdfRenderer);
+  const openLink = mediaElement("A", `https://${HOST}/vault/a.pdf`) as ReturnType<typeof mediaElement> & {
+    parentElement?: unknown;
+    replacement?: unknown;
+  };
+  openLink.parentElement = card;
+
+  await hydrateOssSubtree(openLink as unknown as ParentNode, resolver, pdfRenderer);
+
+  assert.deepEqual(mounts, [`https://${HOST}/vault/a.pdf`]);
+  assert.equal(openLink.replacement, undefined);
 });
 
 test("expands a Live Preview PDF host without replacing its editable CodeMirror node", async () => {
@@ -722,7 +849,7 @@ test("dispose turns a plugin PDF card back into a hot-reloadable canonical place
   assert.equal(remounted, 1);
 });
 
-test("repeated hydration keeps the newest context-menu binding", async () => {
+test("repeated hydration keeps the original context-menu binding", async () => {
   const image = mediaElement("IMG", "oss://vault/retry.jpg");
   let release!: (url: string) => void;
   let bound = false;
@@ -746,9 +873,10 @@ test("repeated hydration keeps the newest context-menu binding", async () => {
   await Promise.resolve();
   await hydrateOssSubtree(image as unknown as ParentNode, resolver, undefined, binder);
 
-  assert.equal(binds, 2);
-  assert.equal(unbinds, 1);
-  assert.equal(bound, true, "the second bind must happen after the old cleanup");
+  // An observer echo must not tear down the live binding for the same key.
+  assert.equal(binds, 1);
+  assert.equal(unbinds, 0);
+  assert.equal(bound, true);
 
   release("https://signed.example/vault/retry.jpg");
   await first;

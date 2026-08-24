@@ -1,5 +1,5 @@
 import { MetadataCache, TFile, TFolder, Vault } from "obsidian";
-import { formatOssReference, scanOssReferences } from "../reference/codec";
+import { assertOssReferenceHostInstalled, formatOssReference, scanOssReferences } from "../reference/codec";
 import { isSupportedExt, PendingReferenceLocator } from "../types";
 
 interface EmbedToken {
@@ -295,6 +295,8 @@ export async function replaceOneResolvedAttachmentReference(
   const md = vault.getAbstractFileByPath(sourcePath);
   if (!(md instanceof TFile)) return false;
   const locator = planned && "locator" in planned ? planned.locator : planned;
+  // 新引用必须是公共 URL：host 未就绪时直接失败，禁止回退写 oss://。
+  assertOssReferenceHostInstalled();
   let committed = false;
   await vault.process(md, (content) => {
     const matches = findMatchingEmbeds(content, md, localFile, metadataCache);
@@ -320,6 +322,8 @@ export async function replaceUploadingPlaceholder(
 ): Promise<boolean> {
   const md = vault.getAbstractFileByPath(sourcePath);
   if (!(md instanceof TFile)) return false;
+  // 新引用必须是公共 URL：host 未就绪时直接失败，禁止回退写 oss://。
+  assertOssReferenceHostInstalled();
   let committed = false;
   await vault.process(md, (content) => {
     const start = locateExactToken(content, locator);

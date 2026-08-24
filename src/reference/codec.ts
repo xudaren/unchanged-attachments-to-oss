@@ -1,4 +1,64 @@
 const OSS_SCHEME = "oss://";
+const HTTPS_SCHEME = "https://";
+
+// The plugin owns exactly one storage identity per Vault, so the reference
+// hosts are global runtime state installed whenever settings load or change.
+// The primary host formats new references (the access host: custom domain or
+// default); the recognition set additionally always keeps the permanent
+// default `{bucket}.{endpoint}` host so legacy public-URL references survive
+// an access-host change. Pure call sites may still pass an explicit host.
+let configuredReferenceHost = "";
+let configuredRecognitionHosts: string[] = [];
+
+/** Install a single host as both primary and the only recognition host. */
+export function setOssReferenceHost(host: string): void {
+  const normalized = normalizeReferenceHost(host);
+  configuredReferenceHost = normalized;
+  configuredRecognitionHosts = normalized ? [normalized] : [];
+}
+
+/**
+ * Install the primary access host used to format references plus the full
+ * recognition host set. Callers must keep the default `{bucket}.{endpoint}`
+ * host in the set so existing-data references stay recognizable.
+ */
+export function setOssReferenceHosts(primary: string, recognized: readonly string[]): void {
+  configuredReferenceHost = normalizeReferenceHost(primary);
+  const hosts = new Set<string>();
+  for (const host of recognized) {
+    try {
+      const normalized = normalizeReferenceHost(host);
+      if (normalized) hosts.add(normalized);
+    } catch {
+      // Defensive: a malformed recognition entry must not break parsing.
+    }
+  }
+  configuredRecognitionHosts = [...hosts];
+}
+
+export function getOssReferenceHost(): string {
+  return configuredReferenceHost;
+}
+
+/**
+ * Document commit boundary guard: new references must always be public URLs,
+ * so a missing access host is a hard failure instead of a silent `oss://`
+ * fallback write.
+ */
+export function assertOssReferenceHostInstalled(): void {
+  if (!configuredReferenceHost) {
+    throw new Error("OSS 引用 host 未就绪：请先完成 Bucket 配置后再写入新引用");
+  }
+}
+
+export function normalizeReferenceHost(host: string): string {
+  const normalized = host.trim().toLowerCase();
+  if (!normalized) return "";
+  if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(normalized)) {
+    throw new Error("引用 host 无效：需为 {bucket}.{endpoint} 形态");
+  }
+  return normalized;
+}
 
 export interface OssReference {
   start: number;
@@ -21,9 +81,16 @@ export function encodeObjectKey(key: string): string {
   return normalized.split("/").map(percentEncodeSegment).join("/");
 }
 
-/** Canonical permanent URL. Three slashes avoid treating the first key segment as a URL host. */
+/** Canonical legacy URL. Three slashes avoid treating the first key segment as a URL host. */
 export function formatOssUrl(key: string): string {
   return `${OSS_SCHEME}/${encodeObjectKey(key)}`;
+}
+
+/** Canonical permanent reference for new uploads: the unsigned public object URL. */
+export function formatPublicUrl(key: string, host: string): string {
+  const normalizedHost = normalizeReferenceHost(host);
+  if (!normalizedHost) throw new Error("公共 URL 需要有效的 {bucket}.{endpoint} host");
+  return `https://${normalizedHost}/${encodeObjectKey(key)}`;
 }
 
 /** Parse canonical and legacy OSS URLs back to the raw Object Key. */
@@ -47,8 +114,51 @@ export function parseOssUrl(source: string): string | null {
   }
 }
 
-export function formatOssReference(key: string, alt = ""): string {
-  return `![${escapeMarkdownLabel(alt)}](${formatOssUrl(key)})`;
+/** Parse an unsigned public object URL of the given storage host back to the raw Object Key. */
+export function parsePublicUrl(source: string, host: string): string | null {
+  if (source !== source.trim()) return null;
+  let normalizedHost: string;
+  try {
+    normalizedHost = normalizeReferenceHost(host);
+  } catch {
+    return null;
+  }
+  if (!normalizedHost) return null;
+  const prefix = `${HTTPS_SCHEME}${normalizedHost}/`;
+  if (!source.toLowerCase().startsWith(prefix)) return null;
+  // Signing only ever appends query parameters; tolerate them while extracting the path.
+  let encoded = source.slice(prefix.length);
+  const queryIndex = encoded.search(/[?#]/);
+  if (queryIndex >= 0) encoded = encoded.slice(0, queryIndex);
+  if (!encoded) return null;
+  try {
+    const key = normalizeObjectKey(decodeURIComponent(encoded));
+    return isUrlSafeObjectKey(key) ? key : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Recognize either reference form. `host` limits matching to that host; otherwise the installed recognition set applies. */
+export function parseOssReferenceUrl(source: string, host?: string): string | null {
+  const legacy = parseOssUrl(source);
+  if (legacy !== null) return legacy;
+  const candidates = host !== undefined
+    ? [host]
+    : configuredRecognitionHosts.length > 0
+      ? configuredRecognitionHosts
+      : [configuredReferenceHost];
+  for (const candidate of candidates) {
+    const key = parsePublicUrl(source, candidate);
+    if (key !== null) return key;
+  }
+  return null;
+}
+
+export function formatOssReference(key: string, alt = "", host?: string): string {
+  const effectiveHost = normalizeReferenceHost(host ?? configuredReferenceHost);
+  const url = effectiveHost ? formatPublicUrl(key, effectiveHost) : formatOssUrl(key);
+  return `![${escapeMarkdownLabel(alt)}](${url})`;
 }
 
 /**
@@ -56,7 +166,7 @@ export function formatOssReference(key: string, alt = ""): string {
  * fenced code and inline code. Canvas/Base JSON still works because Markdown
  * references in their text properties retain the same `![](...)` form.
  */
-export function scanOssReferences(content: string): OssReference[] {
+export function scanOssReferences(content: string, host?: string): OssReference[] {
   const excluded = markdownExcludedRanges(content);
   const references: OssReference[] = [];
   let excludedIndex = 0;
@@ -74,7 +184,7 @@ export function scanOssReferences(content: string): OssReference[] {
     if (destinationEnd < 0) continue;
 
     const destination = markdownDestination(content.slice(labelEnd + 2, destinationEnd).trim());
-    const key = destination ? parseOssUrl(destination) : null;
+    const key = destination ? parseOssReferenceUrl(destination, host) : null;
     if (!key) {
       start = destinationEnd;
       continue;
@@ -96,9 +206,10 @@ export function removeFirstOssReference(
   content: string,
   key: string,
   preferredStart?: number,
+  host?: string,
 ): RemoveOssReferenceResult {
   const normalized = normalizeObjectKey(key);
-  const matches = scanOssReferences(content).filter((reference) => reference.key === normalized);
+  const matches = scanOssReferences(content, host).filter((reference) => reference.key === normalized);
   if (matches.length === 0) return { content, removed: false };
   const reference = preferredStart === undefined
     ? matches[0]
@@ -114,6 +225,27 @@ export function removeFirstOssReference(
 
 export function normalizeObjectKey(value: string): string {
   return value;
+}
+
+/**
+ * Rewrite every recognized reference (legacy `oss://` and public URLs on
+ * retired access hosts) into the canonical public URL form on the given
+ * access host. Idempotent; already-normal references stay byte-identical.
+ */
+export function normalizeOssReferencesToAccessHost(content: string, host: string): string {
+  const normalizedHost = normalizeReferenceHost(host);
+  const references = scanOssReferences(content).filter(
+    (reference) => reference.url !== formatPublicUrl(reference.key, normalizedHost),
+  );
+  if (references.length === 0) return content;
+  let result = "";
+  let cursor = 0;
+  for (const reference of references) {
+    result += content.slice(cursor, reference.start);
+    result += `![${escapeMarkdownLabel(reference.alt)}](${formatPublicUrl(reference.key, normalizedHost)})`;
+    cursor = reference.end;
+  }
+  return result + content.slice(cursor);
 }
 
 function isUrlSafeObjectKey(value: string): boolean {
