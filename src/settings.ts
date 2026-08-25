@@ -11,6 +11,7 @@ import { formatCredentialNotice } from "./oss/errors";
 import { LifecycleQuiescedError } from "./lifecycle";
 import { scanLocalInsuranceCopies } from "./upload/local-copies";
 import { formatAttachmentSize } from "./upload/input";
+import { attachPasswordVisibilityToggle } from "./password-toggle";
 
 /** 凭证相关字段的草稿缓冲 */
 interface CredentialDraft {
@@ -70,10 +71,13 @@ export class OssSettingTab extends PluginSettingTab {
       const unlock = new Setting(containerEl)
         .setName("凭证已锁定")
         .setDesc("输入主密码解锁本次运行；主密码不会保存");
+      let unlockInput: HTMLInputElement | undefined;
       unlock.addText((text) => {
+        unlockInput = text.inputEl;
         text.inputEl.type = "password";
         text.setPlaceholder("主密码").onChange((value) => { this.masterPassword = value; });
       });
+      attachPasswordVisibilityToggle(unlock, () => unlockInput as HTMLInputElement);
       unlock.addButton((button) => button.setButtonText("解锁").setCta().onClick(async () => {
         await this.runWhileActive(async () => {
           try {
@@ -212,23 +216,29 @@ export class OssSettingTab extends PluginSettingTab {
       });
 
     if (!plugin.hasEncryptedCredentials() || plugin.isCredentialsLocked()) {
-      new Setting(containerEl)
+      const masterPasswordSetting = new Setting(containerEl)
         .setName(plugin.isCredentialsLocked() ? "新主密码" : "主密码")
         .setDesc(plugin.isCredentialsLocked()
           ? "仅在忘记原主密码、准备使用新 AK/SK 覆盖旧密文时填写"
-          : "至少 10 个字符；不会保存，忘记后只能重新填写 AK/SK")
-        .addText((text) => {
-          text.inputEl.type = "password";
-          text.setValue(this.masterPassword).onChange((value) => { this.masterPassword = value; });
+          : "至少 10 个字符；不会保存，忘记后只能重新填写 AK/SK");
+      let masterPasswordInput: HTMLInputElement | undefined;
+      masterPasswordSetting.addText((text) => {
+        masterPasswordInput = text.inputEl;
+        text.inputEl.type = "password";
+        text.setValue(this.masterPassword).onChange((value) => { this.masterPassword = value; });
+      });
+      attachPasswordVisibilityToggle(masterPasswordSetting, () => masterPasswordInput as HTMLInputElement);
+
+      const confirmationSetting = new Setting(containerEl).setName("确认主密码");
+      let confirmationInput: HTMLInputElement | undefined;
+      confirmationSetting.addText((text) => {
+        confirmationInput = text.inputEl;
+        text.inputEl.type = "password";
+        text.setValue(this.masterPasswordConfirmation).onChange((value) => {
+          this.masterPasswordConfirmation = value;
         });
-      new Setting(containerEl)
-        .setName("确认主密码")
-        .addText((text) => {
-          text.inputEl.type = "password";
-          text.setValue(this.masterPasswordConfirmation).onChange((value) => {
-            this.masterPasswordConfirmation = value;
-          });
-        });
+      });
+      attachPasswordVisibilityToggle(confirmationSetting, () => confirmationInput as HTMLInputElement);
     }
 
     new Setting(containerEl)

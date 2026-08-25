@@ -1,4 +1,5 @@
 import { App, Modal, Notice, Setting } from "obsidian";
+import { attachPasswordVisibilityToggle } from "./password-toggle";
 
 export type CredentialPromptMode = "migrate" | "unlock";
 
@@ -32,7 +33,9 @@ export class CredentialStartupModal extends Modal {
     const passwordSetting = new Setting(this.contentEl)
       .setName(migrating ? "主密码" : "主密码")
       .setDesc(migrating ? "至少 10 个字符；忘记后只能重新填写 AK/SK" : "仅用于本次运行");
+    let passwordInput: HTMLInputElement | undefined;
     passwordSetting.addText((text) => {
+      passwordInput = text.inputEl;
       text.inputEl.type = "password";
       text.setPlaceholder("输入主密码").onChange((value) => { this.password = value; });
       text.inputEl.addEventListener("keydown", (event) => {
@@ -40,15 +43,20 @@ export class CredentialStartupModal extends Modal {
       });
       window.setTimeout(() => text.inputEl.focus(), 0);
     });
+    attachPasswordVisibilityToggle(passwordSetting, () => passwordInput as HTMLInputElement);
 
     if (migrating) {
-      new Setting(this.contentEl).setName("确认主密码").addText((text) => {
+      const confirmationSetting = new Setting(this.contentEl).setName("确认主密码");
+      let confirmationInput: HTMLInputElement | undefined;
+      confirmationSetting.addText((text) => {
+        confirmationInput = text.inputEl;
         text.inputEl.type = "password";
         text.setPlaceholder("再次输入主密码").onChange((value) => { this.confirmation = value; });
         text.inputEl.addEventListener("keydown", (event) => {
           if (event.key === "Enter") void this.runSubmit(submitButton);
         });
       });
+      attachPasswordVisibilityToggle(confirmationSetting, () => confirmationInput as HTMLInputElement);
     }
 
     new Setting(this.contentEl)
