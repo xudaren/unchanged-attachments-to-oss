@@ -33,6 +33,7 @@ interface RichElement {
   removeAttribute(name: string): void;
   closest(selector: string): RichElement | null;
   createEl(tag: string, options?: { cls?: string; text?: string }): RichElement;
+  append(...nodes: RichElement[]): void;
   insertAdjacentElement(position: string, child: RichElement): RichElement;
   replaceWith(replacement: RichElement): void;
   remove(): void;
@@ -70,6 +71,12 @@ function richElement(tagName: string, attributes: Record<string, string> = {}): 
       child.parentElement = element;
       element.children.push(child);
       return child;
+    },
+    append(...nodes) {
+      for (const node of nodes) {
+        node.parentElement = element;
+        element.children.push(node);
+      }
     },
     insertAdjacentElement: (_position, child) => {
       element.adjacent = child;

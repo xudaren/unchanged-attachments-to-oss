@@ -394,7 +394,7 @@ function hydrateUploadingPlaceholder(
 ): void {
   if (renderStateKey(html) === key) return;
   for (let parent = html.parentElement; parent; parent = parent.parentElement) {
-    if (renderStateKey(parent as HTMLElement) === key) return;
+    if (renderStateKey(parent) === key) return;
   }
   for (const descendant of findDescendants(html, "[data-oss-render-key]")) {
     if (renderStateKey(descendant as HTMLElement) === key) return;

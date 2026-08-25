@@ -984,6 +984,7 @@ interface UploadingElement {
   closest(selector: string): UploadingElement | null;
   matches(selector: string): boolean;
   createEl(tag: string, options?: { cls?: string; text?: string }): UploadingElement;
+  append(...nodes: UploadingElement[]): void;
   insertAdjacentElement(position: string, child: UploadingElement): UploadingElement;
   replaceWith(replacement: UploadingElement): void;
   remove(): void;
@@ -1033,6 +1034,12 @@ function uploadingMediaElement(
       child.parentElement = element;
       element.children.push(child);
       return child;
+    },
+    append(...nodes) {
+      for (const child of nodes) {
+        child.parentElement = element;
+        element.children.push(child);
+      }
     },
     insertAdjacentElement: (_position, child) => {
       element.insertions += 1;

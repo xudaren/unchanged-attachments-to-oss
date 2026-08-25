@@ -83,11 +83,11 @@ export function commitUploadingPlaceholder(tempId: string, committedSource: stri
  * 直接清扫页面残留。
  */
 function sweepLeftoverUploadingCards(tempId: string): void {
-  const document = globalThis.document as Document | undefined;
+  const page = typeof document !== "undefined" ? document : undefined;
   const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function"
     ? CSS.escape(tempId)
     : tempId.replace(/["\\]/g, "\\$&");
-  const cards = document?.querySelectorAll?.(`.oss-uploading-placeholder[data-oss-uploading-id="${escaped}"]`);
+  const cards = page?.querySelectorAll?.(`.oss-uploading-placeholder[data-oss-uploading-id="${escaped}"]`);
   if (!cards) return;
   for (const card of Array.from(cards)) card.remove();
 }
@@ -117,14 +117,26 @@ export function mountUploadingPlaceholder(media: HTMLElement, key: string): Uplo
   // tempId 标记支持提交后的全局兜底清扫。
   card.setAttribute("data-oss-uploading-id", tempId);
 
-  const badge = card.createEl("span", { cls: "oss-uploading-badge", text: badgeText(name) });
+  const badge = createElementLike(media, "span");
+  badge.className = "oss-uploading-badge";
+  badge.textContent = badgeText(name);
   badge.setAttribute("aria-hidden", "true");
-  const details = card.createEl("span", { cls: "oss-uploading-details" });
-  const nameEl = details.createEl("span", { cls: "oss-uploading-name", text: name });
+  const details = createElementLike(media, "span");
+  details.className = "oss-uploading-details";
+  const nameEl = createElementLike(media, "span");
+  nameEl.className = "oss-uploading-name";
+  nameEl.textContent = name;
   nameEl.title = name;
-  const status = details.createEl("span", { cls: "oss-uploading-status", text: "上传中…" });
-  const bar = details.createEl("span", { cls: "oss-uploading-bar" });
-  const fill = bar.createEl("span", { cls: "oss-uploading-bar-fill" });
+  const status = createElementLike(media, "span");
+  status.className = "oss-uploading-status";
+  status.textContent = "上传中…";
+  const bar = createElementLike(media, "span");
+  bar.className = "oss-uploading-bar";
+  const fill = createElementLike(media, "span");
+  fill.className = "oss-uploading-bar-fill";
+  bar.append(fill);
+  details.append(nameEl, status, bar);
+  card.append(badge, details);
 
   const apply = (state?: UploadingProgressState): void => {
     if (state && state.total > 0) {
