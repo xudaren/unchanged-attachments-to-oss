@@ -7,7 +7,8 @@ import {
   Vault,
 } from "obsidian";
 import { normalizeError } from "../error";
-import { assertOssReferenceHostInstalled, formatOssReference } from "../reference/codec";
+import { assertOssReferenceHostInstalled, formatOssReference, formatPublicUrl, getOssReferenceHost } from "../reference/codec";
+import { commitUploadingPlaceholder, publishUploadingProgress } from "../render/uploading-placeholder";
 import { LifecycleGate, LifecycleQuiescedError } from "../lifecycle";
 import { PendingReferenceLocator, PendingUpload, PluginSettings, isSupportedExt } from "../types";
 import { RetryBatchResult, RetryEntry, RetryIndicator } from "./indicator";
@@ -288,6 +289,7 @@ export class AttachmentInterceptor {
         sourceMtime: input.sourceMtime,
         automatic: true,
         onProgress: (done, total) => {
+          publishUploadingProgress(input.tempId, done, total);
           this.progress?.begin(input.name, total);
           this.progress?.advance(done);
         },
@@ -325,6 +327,7 @@ export class AttachmentInterceptor {
         );
       }
       if (!committed) throw new Error("上传已完成，但唯一占位符已被修改或删除；staging 已保留");
+      this.notifyPlaceholderCommitted(input.tempId, uploaded.objectKey);
       await this.manager.markCleanupPending(tempId);
       this.lifecycle?.assertActive("删除本地 staging");
       await this.deleteLocalFile(input.stagingPath, input.size, input.sourceMtime);
@@ -684,6 +687,10 @@ export class AttachmentInterceptor {
             occurrenceId: entry.occurrenceId,
             locator: pendingBefore?.locator,
             sourceMtime: file.stat.mtime,
+            onProgress: (done, total) => {
+              const progressId = pendingBefore?.tempId ?? entry.tempId;
+              if (progressId) publishUploadingProgress(progressId, done, total);
+            },
           });
           const wroteReference = await this.commitRetryReference(
             file,
@@ -876,8 +883,18 @@ export class AttachmentInterceptor {
     if (!committed && !await sourceContainsObject(this.plugin.app.vault, entry.mdPath, objectKey)) {
       throw new Error(`未找到 ${entry.localPath} 的精确引用，已保留本地文件`);
     }
+    if (committed && pending?.locator?.kind === "placeholder") {
+      this.notifyPlaceholderCommitted(pendingBefore?.tempId ?? tempId, objectKey);
+    }
     await this.manager.markCleanupPending(tempId);
     return committed;
+  }
+
+  /** 引用落库后通知渲染侧，把还挂着的上传中占位原地换成正式引用。 */
+  private notifyPlaceholderCommitted(tempId: string, objectKey: string): void {
+    const host = getOssReferenceHost();
+    if (!host) return;
+    commitUploadingPlaceholder(tempId, formatPublicUrl(objectKey, host));
   }
 
   private async finalOccurrences(

@@ -21,6 +21,7 @@ await esbuild.build({
     "tests/render/url-resolver.test.ts",
     "tests/render/architecture.test.ts",
     "tests/render/dom-renderer.test.ts",
+    "tests/render/uploading-placeholder.test.ts",
     "tests/render/post-processor.test.ts",
     "tests/render/pdf-link.test.ts",
     "tests/render/context-menu.test.ts",

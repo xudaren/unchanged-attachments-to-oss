@@ -40,6 +40,7 @@ import { OssAttachmentContextMenu } from "./render/context-menu";
 import { getOssReferenceHost, setOssReferenceHost, setOssReferenceHosts } from "./reference/codec";
 import { normalizeVaultReferencesToAccessHost } from "./reference/convert";
 import { disconnectMediaLoading } from "./render/media-loading";
+import { clearUploadingProgressBus } from "./render/uploading-placeholder";
 import { runObjectAudit } from "./audit/modal";
 import { LifecycleQuiescedError, PluginLifecycle } from "./lifecycle";
 import {
@@ -248,6 +249,7 @@ export default class OssPlugin extends Plugin {
       disposeOssRenderSessions(this.app.workspace.containerEl, this.attachmentContextMenu);
       this.attachmentContextMenu.dispose();
       disconnectMediaLoading();
+      clearUploadingProgressBus();
       clearHmacKeyCache();
     });
 

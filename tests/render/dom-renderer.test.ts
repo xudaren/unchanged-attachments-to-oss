@@ -11,6 +11,7 @@ import {
   resetOssRenderSessions,
   selectMutationRoots,
 } from "../../src/render/dom-renderer";
+import { clearUploadingProgressBus, commitUploadingPlaceholder } from "../../src/render/uploading-placeholder";
 
 const HOST = "bucket-a.oss-cn-hangzhou.aliyuncs.com";
 setOssReferenceHost(HOST);
@@ -960,4 +961,222 @@ test("removed-node cleanup ignores Canvas media that was only moved", async () =
   disposeRemovedOssRenderSessions([removal]);
   assert.equal(image.src, "oss:///vault/canvas.jpg");
   assert.equal(image.dataset.ossRenderKey, undefined);
+});
+
+interface UploadingElement {
+  nodeType: number;
+  tagName: string;
+  className: string;
+  textContent: string;
+  dataset: Record<string, string>;
+  style: Record<string, string>;
+  children: UploadingElement[];
+  parentElement: UploadingElement | null;
+  removed: boolean;
+  adjacent: UploadingElement | null;
+  replacedBy: UploadingElement | null;
+  insertions: number;
+  isConnected?: boolean;
+  classList: { add(name: string): void; remove(name: string): void; contains(name: string): boolean };
+  getAttribute(name: string): string | null;
+  setAttribute(name: string, value: string): void;
+  removeAttribute(name: string): void;
+  closest(selector: string): UploadingElement | null;
+  matches(selector: string): boolean;
+  createEl(tag: string, options?: { cls?: string; text?: string }): UploadingElement;
+  insertAdjacentElement(position: string, child: UploadingElement): UploadingElement;
+  replaceWith(replacement: UploadingElement): void;
+  remove(): void;
+  ownerDocument: { createElement(tag: string): UploadingElement };
+}
+
+function uploadingMediaElement(
+  tagName: string,
+  attributes: Record<string, string> = {},
+  className = "",
+): UploadingElement {
+  const attrs = new Map(Object.entries(attributes));
+  const classSet = new Set(className.split(" ").filter(Boolean));
+  const element: UploadingElement = {
+    nodeType: 1,
+    tagName,
+    className,
+    textContent: "",
+    dataset: {},
+    style: {},
+    children: [],
+    parentElement: null,
+    removed: false,
+    adjacent: null,
+    replacedBy: null,
+    insertions: 0,
+    classList: {
+      add: (name) => { classSet.add(name); },
+      remove: (name) => { classSet.delete(name); },
+      contains: (name) => classSet.has(name),
+    },
+    getAttribute: (name) => attrs.get(name) ?? null,
+    setAttribute: (name, value) => { attrs.set(name, value); },
+    removeAttribute: (name) => { attrs.delete(name); },
+    closest: () => null,
+    matches(selector: string): boolean {
+      if (selector.includes("data-oss-render-key")) return element.dataset.ossRenderKey !== undefined;
+      const src = attrs.get("src") ?? attrs.get("href") ?? "";
+      const remote = src.startsWith("oss://") || src.startsWith("https://");
+      if (selector.includes(".internal-embed")) return classSet.has("internal-embed") && remote;
+      return remote;
+    },
+    createEl(tag, options) {
+      const child = uploadingMediaElement(tag.toUpperCase());
+      if (options?.cls) child.className = options.cls;
+      if (options?.text !== undefined) child.textContent = options.text;
+      child.parentElement = element;
+      element.children.push(child);
+      return child;
+    },
+    insertAdjacentElement: (_position, child) => {
+      element.insertions += 1;
+      element.adjacent = child;
+      return child;
+    },
+    replaceWith: (replacement) => {
+      element.replacedBy = replacement;
+      element.removed = true;
+    },
+    remove() { element.removed = true; },
+    ownerDocument: { createElement: (tag) => uploadingMediaElement(tag.toUpperCase()) },
+  };
+  return element;
+}
+
+function append(parent: UploadingElement, child: UploadingElement): void {
+  child.parentElement = parent;
+  parent.children.push(child);
+}
+
+test("mounts the uploading placeholder by swapping the broken media without signing", async () => {
+  clearUploadingProgressBus();
+  const image = uploadingMediaElement("IMG", {
+    src: "oss://uploading/task-1",
+    alt: "上传中 截图.png",
+  });
+
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => { throw new Error("uploading placeholder must never be signed"); },
+  });
+
+  assert.equal(image.dataset.ossRenderKey, "uploading/task-1");
+  assert.equal(image.replacedBy?.className, "oss-uploading-placeholder");
+  assert.equal(image.getAttribute("data-oss-uploading-swapped"), "true");
+  assert.equal(image.getAttribute("src"), "oss://uploading/task-1");
+  clearUploadingProgressBus();
+});
+
+test("observer echoes of the uploading placeholder never mount a second card", async () => {
+  clearUploadingProgressBus();
+  const image = uploadingMediaElement("IMG", { src: "oss://uploading/task-2" });
+
+  await hydrateOssSubtree(image as unknown as ParentNode, { resolve: async () => "" });
+  const card = image.replacedBy;
+  await hydrateOssSubtree(image as unknown as ParentNode, { resolve: async () => "" });
+
+  assert.equal(image.replacedBy, card);
+  assert.equal(card?.replacedBy, null);
+  clearUploadingProgressBus();
+});
+
+test("nested embed host and broken image share one uploading card", async () => {
+  clearUploadingProgressBus();
+  const host = uploadingMediaElement("SPAN", {
+    src: "oss://uploading/task-3",
+  }, "internal-embed image-embed");
+  const image = uploadingMediaElement("IMG", { src: "oss://uploading/task-3" });
+  append(host, image);
+
+  await hydrateOssSubtree(host as unknown as ParentNode, { resolve: async () => "" });
+
+  assert.equal(host.replacedBy, null);
+  assert.notEqual(image.replacedBy, null);
+  assert.equal(image.getAttribute("data-oss-uploading-swapped"), "true");
+  assert.equal(host.dataset.ossRenderKey, "uploading/task-3");
+  clearUploadingProgressBus();
+});
+
+test("disposing an uploading session restores the broken media and keeps the md source", async () => {
+  clearUploadingProgressBus();
+  const image = uploadingMediaElement("IMG", {
+    src: "oss://uploading/task-4",
+    alt: "上传中 视频.mp4",
+  });
+
+  await hydrateOssSubtree(image as unknown as ParentNode, { resolve: async () => "" });
+  const card = image.replacedBy;
+  disposeOssRenderSessions(image as unknown as ParentNode);
+
+  assert.equal(card?.replacedBy, image);
+  assert.equal(image.getAttribute("data-oss-uploading-swapped"), null);
+  assert.equal(image.getAttribute("src"), "oss://uploading/task-4");
+  assert.equal(image.dataset.ossRenderKey, undefined);
+  clearUploadingProgressBus();
+});
+
+test("removal cleanup skips media that the placeholder swapped out on purpose", async () => {
+  clearUploadingProgressBus();
+  const image = uploadingMediaElement("IMG", { src: "oss://uploading/task-7" }) as UploadingElement;
+  await hydrateOssSubtree(image as unknown as ParentNode, { resolve: async () => "" });
+  const card = image.replacedBy;
+  image.isConnected = false;
+
+  disposeRemovedOssRenderSessions([{
+    type: "childList",
+    removedNodes: [image],
+  } as unknown as MutationRecord]);
+
+  assert.equal(image.dataset.ossRenderKey, "uploading/task-7");
+  assert.equal(card?.replacedBy, null);
+  clearUploadingProgressBus();
+});
+
+test("committing the reference swaps a stale uploading placeholder in place", async () => {
+  clearUploadingProgressBus();
+  const image = uploadingMediaElement("IMG", {
+    src: "oss://uploading/task-5",
+    alt: "上传中 截图.png",
+  });
+  const keys: string[] = [];
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async (key: string) => {
+      keys.push(key);
+      return "https://signed.example/vault/a.png";
+    },
+  });
+  const card = image.replacedBy;
+  assert.notEqual(card, null);
+
+  // Stale surfaces never rebuild the node themselves; the commit signal must
+  // remove the card and render the committed reference on the same element.
+  commitUploadingPlaceholder("task-5", `https://${HOST}/vault/a.png`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(card?.replacedBy, image);
+  assert.deepEqual(keys, ["vault/a.png"]);
+  assert.equal(image.src, "https://signed.example/vault/a.png");
+  assert.equal(image.dataset.ossRenderKey, "vault/a.png");
+  clearUploadingProgressBus();
+});
+
+test("commit signal ignores placeholders whose session already ended", async () => {
+  clearUploadingProgressBus();
+  const image = uploadingMediaElement("IMG", { src: "oss://uploading/task-6" });
+  await hydrateOssSubtree(image as unknown as ParentNode, {
+    resolve: async () => { throw new Error("ended session must not re-sign"); },
+  });
+  disposeOssRenderSessions(image as unknown as ParentNode);
+
+  commitUploadingPlaceholder("task-6", `https://${HOST}/vault/b.jpg`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(image.getAttribute("src"), "oss://uploading/task-6");
+  assert.equal(image.dataset.ossRenderKey, undefined);
+  clearUploadingProgressBus();
 });

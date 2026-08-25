@@ -23,6 +23,11 @@ import {
 } from "./render-state";
 import type { LeaseUrlResolver, SignedUrlLease } from "./url-resolver";
 import {
+  isUploadingKey,
+  mountUploadingPlaceholder,
+  registerUploadingCommitHandler,
+} from "./uploading-placeholder";
+import {
   isUrlResolverDisposed,
   resolveUrlLease,
   SignedUrlResolverDisposedError,
@@ -190,6 +195,9 @@ export function disposeRemovedOssRenderSessions(
       // and appending it elsewhere in the same task. MutationObserver runs after
       // that move, so a connected node is still live and must not be restored.
       if (node.isConnected) continue;
+      // The uploading placeholder swaps this media out on purpose; disposing it
+      // here would immediately undo the swap and churn forever.
+      if ((node as HTMLElement).getAttribute?.("data-oss-uploading-swapped") === "true") continue;
       disposeOssRenderSessions(node as ParentNode, contextMenu);
     }
   }
@@ -234,6 +242,9 @@ function restoreCanonicalRenderSource(
   key: string,
   displayName: string,
 ): HTMLElement {
+  // Uploading placeholders keep their original md-owned source untouched;
+  // rewriting it would echo through the observer and churn Live Preview widgets.
+  if (isUploadingKey(key)) return element;
   const canonicalSource = formatOssUrl(key);
   if (mediaKind(key) === "embed" && !isLivePreviewEmbedHost(element) && !isNativePdfPlaceholder(element)) {
     const placeholder = createElementLike(element, "img");
@@ -271,11 +282,15 @@ async function hydrateElement(
   const attribute = element.tagName === "A" ? "href" : "src";
   const source = element.getAttribute(attribute);
   const key = source ? ossKeyFromImageSource(source) : null;
-  if (!key || key.startsWith("uploading/")) {
+  if (!key) {
     if (ownsCurrentSource(html)) return;
     cleanupRenderState(html);
     cancelMediaLoading(element);
     clearOssRenderError(element);
+    return;
+  }
+  if (isUploadingKey(key)) {
+    hydrateUploadingPlaceholder(html, key, attribute, resolver, pdfRenderer, contextMenu, sourcePath, lifetime);
     return;
   }
   // The renderer's own DOM writes (applied URLs, mounted captions, media moved
@@ -360,6 +375,55 @@ async function hydrateElement(
   } finally {
     if (html.dataset.ossSigningKey === key) delete html.dataset.ossSigningKey;
   }
+}
+
+/**
+ * Mount the shared uploading card for an `oss://uploading/{tempId}` placeholder.
+ * Both directions of the nesting check are required: reading view exposes the
+ * outer `.internal-embed` and its inner broken `img` as separate candidates.
+ */
+function hydrateUploadingPlaceholder(
+  html: HTMLElement,
+  key: string,
+  attribute: "src" | "href",
+  resolver: UrlResolver,
+  pdfRenderer: PdfRenderer,
+  contextMenu?: AttachmentContextMenuBinder,
+  sourcePath?: string,
+  lifetime?: RenderSessionLifetime,
+): void {
+  if (renderStateKey(html) === key) return;
+  for (let parent = html.parentElement; parent; parent = parent.parentElement) {
+    if (renderStateKey(parent as HTMLElement) === key) return;
+  }
+  for (const descendant of findDescendants(html, "[data-oss-render-key]")) {
+    if (renderStateKey(descendant as HTMLElement) === key) return;
+  }
+  cleanupRenderState(html);
+  cancelMediaLoading(html);
+  clearOssRenderError(html);
+  beginRenderState(html, key, attribute);
+  if (!trackRenderSession(html, lifetime)) return;
+  const mount = mountUploadingPlaceholder(html, key);
+  // Stale surfaces (Reading View, unfocused splits) never rebuild this node
+  // after the reference commits, so the commit signal swaps the placeholder
+  // for the committed source in place instead of waiting for a removal.
+  const unregisterCommit = registerUploadingCommitHandler(
+    key.slice("uploading/".length),
+    (committedSource) => {
+      if (renderStateKey(html) !== key) return;
+      if (isUrlResolverDisposed(resolver) || (lifetime && !lifetime.isActive)) return;
+      cleanupRenderState(html);
+      cancelMediaLoading(html);
+      clearOssRenderError(html);
+      html.setAttribute(attribute, committedSource);
+      void hydrateElement(html, resolver, pdfRenderer, contextMenu, sourcePath, lifetime);
+    },
+  );
+  setRenderCleanup(html, "uploading-placeholder", () => {
+    unregisterCommit();
+    mount.dispose();
+  });
 }
 
 function trackRenderSession(

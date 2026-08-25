@@ -19,6 +19,122 @@
   font-size: var(--font-ui-small);
 }
 
+/* 上传中占位卡片：原位替换 widget 内的破媒体节点显示 */
+.oss-uploading-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  max-width: 100%;
+  min-height: 64px;
+  padding: 11px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--background-secondary), var(--background-primary-alt));
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  box-sizing: border-box;
+}
+
+.oss-uploading-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 42px;
+  height: 42px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--interactive-accent) 16%, transparent);
+  color: var(--text-accent);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+}
+
+.oss-uploading-details {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  gap: 4px;
+}
+
+.oss-uploading-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-normal);
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.oss-uploading-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.25;
+}
+
+.oss-uploading-bar {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.oss-uploading-bar-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 2px;
+  background: var(--interactive-accent);
+  transition: width 160ms ease;
+}
+
+.oss-uploading-indeterminate .oss-uploading-bar-fill {
+  width: 36%;
+  animation: oss-uploading-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes oss-uploading-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(280%);
+  }
+}
+
+.markdown-source-view .oss-uploading-placeholder,
+.markdown-reading-view .oss-uploading-placeholder,
+.canvas-node .oss-uploading-placeholder {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Live Preview 的 image-wrapper 随破图收缩，卡片保留可读宽度 */
+.image-wrapper .oss-uploading-placeholder {
+  min-width: min(100%, 280px);
+}
+
+@media (max-width: 480px) {
+  .oss-uploading-placeholder {
+    gap: 10px;
+    min-height: 58px;
+    padding: 9px 10px;
+  }
+
+  .oss-uploading-badge {
+    flex-basis: 36px;
+    height: 36px;
+    border-radius: 8px;
+  }
+}
+
 .oss-delete-list {
   max-height: 260px;
   margin-bottom: 12px;
