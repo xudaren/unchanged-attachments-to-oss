@@ -267,22 +267,13 @@ export default class OssPlugin extends Plugin {
     this.addCommand({
       id: "test-oss-connection",
       name: "测试 OSS 连接",
-      callback: () => void this.lifecycle.run(() => this.testConnection()).catch((error) => {
-        if (!(error instanceof LifecycleQuiescedError)) console.warn("[oss] 连接测试失败", error);
-      }),
+      callback: () => this.testConnectionCommand(),
     });
 
     this.addCommand({
       id: "cleanup-orphan-uploads",
       name: "清理孤儿分片上传",
-      callback: () => {
-        if (!this.requireConfigured()) return;
-        void this.lifecycle.run(() => this.uploadManager.cleanupOrphans()).catch((error) => {
-          if (error instanceof LifecycleQuiescedError) return;
-          console.warn("[oss] 清理孤儿分片失败", error);
-          new Notice(`清理失败：${(error as Error).message}`);
-        });
-      },
+      callback: () => this.cleanupOrphanUploads(),
     });
 
     this.addCommand({
@@ -302,45 +293,19 @@ export default class OssPlugin extends Plugin {
     this.addCommand({
       id: "audit-oss-object-references",
       name: "核验 OSS 对象引用",
-      callback: () => {
-        if (!this.requireConfigured()) return;
-        const prefix = `${normalizeObjectKeyPrefix(this.settings.objectKeyPrefix)}/`;
-        void this.lifecycle.run(() => runObjectAudit({
-          app: this.app,
-          vault: this.app.vault,
-          client: this.client,
-          prefix,
-          pendingUploads: this.settings.pendingUploads,
-          lifecycle: this.lifecycle,
-        })).catch((error) => {
-          if (!(error instanceof LifecycleQuiescedError)) console.warn("[oss-audit] 命令失败", error);
-        });
-      },
+      callback: () => this.auditObjectReferences(),
     });
 
     this.addCommand({
       id: "migrate-all-attachments",
       name: "迁移所有本地附件到 OSS",
-      callback: () => {
-        if (this.requireConfigured()) {
-          void this.lifecycle.run(() => migrateAttachments(
-            this,
-            this.uploadManager,
-            undefined,
-            this.lifecycle,
-          )).catch((error) => {
-            if (!(error instanceof LifecycleQuiescedError)) console.warn("[oss-migrate] 命令失败", error);
-          });
-        }
-      },
+      callback: () => this.migrateAllAttachments(),
     });
 
     this.addCommand({
       id: "migrate-folder-attachments",
       name: "迁移指定文件夹附件到 OSS",
-      callback: () => {
-        if (this.requireConfigured()) this.pickFolderAndMigrate();
-      },
+      callback: () => this.pickFolderAndMigrate(),
     });
 
     this.addCommand({
@@ -350,8 +315,54 @@ export default class OssPlugin extends Plugin {
     });
   }
 
+  /** 测试连接：设置页按钮与命令面板共用入口 */
+  testConnectionCommand(): void {
+    void this.lifecycle.run(() => this.testConnection()).catch((error) => {
+      if (!(error instanceof LifecycleQuiescedError)) console.warn("[oss] 连接测试失败", error);
+    });
+  }
+
+  /** 清理孤儿分片：设置页按钮与命令面板共用入口 */
+  cleanupOrphanUploads(): void {
+    if (!this.requireConfigured()) return;
+    void this.lifecycle.run(() => this.uploadManager.cleanupOrphans()).catch((error) => {
+      if (error instanceof LifecycleQuiescedError) return;
+      console.warn("[oss] 清理孤儿分片失败", error);
+      new Notice(`清理失败：${(error as Error).message}`);
+    });
+  }
+
+  /** 核验 OSS 对象引用：设置页按钮与命令面板共用入口 */
+  auditObjectReferences(): void {
+    if (!this.requireConfigured()) return;
+    const prefix = `${normalizeObjectKeyPrefix(this.settings.objectKeyPrefix)}/`;
+    void this.lifecycle.run(() => runObjectAudit({
+      app: this.app,
+      vault: this.app.vault,
+      client: this.client,
+      prefix,
+      pendingUploads: this.settings.pendingUploads,
+      lifecycle: this.lifecycle,
+    })).catch((error) => {
+      if (!(error instanceof LifecycleQuiescedError)) console.warn("[oss-audit] 命令失败", error);
+    });
+  }
+
+  /** 迁移所有本地附件：设置页按钮与命令面板共用入口 */
+  migrateAllAttachments(): void {
+    if (!this.requireConfigured()) return;
+    void this.lifecycle.run(() => migrateAttachments(
+      this,
+      this.uploadManager,
+      undefined,
+      this.lifecycle,
+    )).catch((error) => {
+      if (!(error instanceof LifecycleQuiescedError)) console.warn("[oss-migrate] 命令失败", error);
+    });
+  }
+
   /** One-shot idempotent rewrite of legacy and retired-host references to the current access host. */
-  private async normalizeReferencesToAccessHost(): Promise<void> {
+  async normalizeReferencesToAccessHost(): Promise<void> {
     const host = getOssReferenceHost();
     if (!host) {
       new Notice("存储身份未就绪：请先完成 Bucket 配置");
@@ -684,6 +695,10 @@ export default class OssPlugin extends Plugin {
   }
 
   async testConnection(): Promise<void> {
+    if (this.isCredentialsLocked()) {
+      new Notice("凭证已锁定：请先输入主密码解锁后再测试连接");
+      return;
+    }
     if (!this.isConfigured()) {
       new Notice("OSS 未配置：请填写 Bucket / AK / SK");
       return;
@@ -754,6 +769,10 @@ export default class OssPlugin extends Plugin {
 
   private requireConfigured(): boolean {
     if (this.isConfigured()) return true;
+    if (this.isCredentialsLocked()) {
+      new Notice("凭证已锁定：请先输入主密码解锁后再执行该操作");
+      return false;
+    }
     new Notice("OSS 配置无效：请在设置页填写并通过保存校验");
     return false;
   }
@@ -792,7 +811,9 @@ export default class OssPlugin extends Plugin {
     }
   }
 
-  private pickFolderAndMigrate(): void {
+  /** 迁移指定文件夹附件：设置页按钮与命令面板共用入口 */
+  pickFolderAndMigrate(): void {
+    if (!this.requireConfigured()) return;
     const folders = getAllFolders(this.app.vault.getRoot());
     new FolderSuggestModal(this.app, folders, (folder) => {
       void this.lifecycle.run(() => migrateAttachments(

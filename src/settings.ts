@@ -279,9 +279,54 @@ export class OssSettingTab extends PluginSettingTab {
         }),
       );
 
+    new Setting(containerEl)
+      .setName("测试连接")
+      .setDesc("向已保存的配置发送凭证探针，确认 Bucket 可访问、AK/SK 有效")
+      .addButton((b) =>
+        b.setButtonText("测试连接").onClick(() => {
+          plugin.testConnectionCommand();
+        }),
+      );
+
     // ─── 维护 ────────────────────────────────────────────────────────────────
 
     new Setting(containerEl).setName("维护").setHeading();
+
+    new Setting(containerEl)
+      .setName("迁移所有本地附件")
+      .setDesc("把文档已引用的本地支持类型附件批量上传到 OSS 并替换引用；已有保险副本机制保障可恢复")
+      .addButton((b) =>
+        b.setButtonText("开始迁移").onClick(() => {
+          plugin.migrateAllAttachments();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("迁移指定文件夹附件")
+      .setDesc("选择一个文件夹，只批量迁移其中文档引用的本地附件")
+      .addButton((b) =>
+        b.setButtonText("选择文件夹").onClick(() => {
+          plugin.pickFolderAndMigrate();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("核验 OSS 对象引用")
+      .setDesc("全量扫描 Vault 引用，与 OSS 实际对象做差集报告，可安全清理孤儿对象；需要 ListObjects 权限")
+      .addButton((b) =>
+        b.setButtonText("开始核验").onClick(() => {
+          plugin.auditObjectReferences();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("归一引用到当前访问域名")
+      .setDesc("把遗留 oss:// 与退役访问域名引用一次性改写为当前访问域名的公共 URL；幂等，无匹配时不改文件")
+      .addButton((b) =>
+        b.setButtonText("立即归一").onClick(() => {
+          void this.runWhileActive(() => plugin.normalizeReferencesToAccessHost());
+        }),
+      );
 
     const localCopiesSetting = new Setting(containerEl)
       .setName("本地保险副本")
@@ -317,7 +362,9 @@ export class OssSettingTab extends PluginSettingTab {
         b.setButtonText("立即清理").onClick(async () => {
           await this.runWhileActive(async () => {
             if (!plugin.isConfigured()) {
-              new Notice("OSS 配置无效：请先填写并通过保存校验");
+              new Notice(plugin.isCredentialsLocked()
+                ? "凭证已锁定：请先输入主密码解锁后再执行该操作"
+                : "OSS 配置无效：请先填写并通过保存校验");
               return;
             }
             try {
