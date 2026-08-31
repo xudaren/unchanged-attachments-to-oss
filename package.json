@@ -1,6 +1,6 @@
 {
   "name": "unchanged-attachments-to-oss",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Obsidian plugin: upload immutable attachments to Aliyun OSS with dynamic signed URLs.",
   "main": "main.js",
   "scripts": {
